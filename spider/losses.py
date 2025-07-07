@@ -241,12 +241,7 @@ class PCK(nn.Module):
              view1['depthmap'], view2['depthmap'], T_1to2, K1, K2, matches, is_2port, height2, width2
         )
        
-        return {
-            "epe": epe,
-            "pck_1": pck_1,
-            "pck_3": pck_3,
-            "pck_5": pck_5,
-        }
+        return epe, dict(epe=epe, pck1 = pck_1, pck3 = pck_3, pck5 = pck_5)
 
    
 

@@ -29,7 +29,7 @@ from spider.inference import loss_of_one_batch
 from spider.losses import *
 
 import spider.utils.path_to_dust3r #noqa
-from dust3r.model import AsymmetricCroCo3DStereo, inf  # noqa: F401, needed when loading the model
+from dust3r.model import inf  # noqa: F401, needed when loading the model
 from dust3r.datasets import get_data_loader  # noqa
 from dust3r.datasets.utils.transforms import ColorJitter
 import dust3r.utils.path_to_croco  # noqa: F401
@@ -38,12 +38,12 @@ from croco.utils.misc import NativeScalerWithGradNormCount as NativeScaler  # no
 import pdb
 
 def get_args_parser():
-    parser = argparse.ArgumentParser('DUST3R training', add_help=False)
+    parser = argparse.ArgumentParser('SPIDER training', add_help=False)
     # model and criterion
-    parser.add_argument('--model', default="AsymmetricCroCo3DStereo(patch_embed_cls='ManyAR_PatchEmbed')",
+    parser.add_argument('--model', default="SPIDER(patch_embed_cls='ManyAR_PatchEmbed')",
                         type=str, help="string containing the model to build")
     parser.add_argument('--pretrained', default=None, help='path of a starting checkpoint')
-    parser.add_argument('--train_criterion', default="ConfLoss(Regr3D(L21, norm_mode='avg_dis'), alpha=0.2)",
+    parser.add_argument('--train_criterion', default="RobustLosses()",
                         type=str, help="train criterion")
     parser.add_argument('--test_criterion', default=None, type=str, help="test criterion")
 

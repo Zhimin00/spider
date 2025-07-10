@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from .roma import TransformerDecoder, Block, MemEffAttention, ConvRefiner, Decoder, CosKernel, GP
 from einops import rearrange
 import pdb
+
 class WarpHead(nn.Module):
     def __init__(
             self,
@@ -39,7 +40,8 @@ class WarpHead(nn.Module):
                                 **(corresps if corresps else {}),
                                 scale_factor=scale_factor)
         return corresps
-    
+
+## warp or linear
 def head_factory(head_type, net):
     if head_type == 'warp':
         patch_size = net.patch_embed.patch_size
@@ -175,6 +177,9 @@ def head_factory(head_type, net):
                         displacement_dropout_p = displacement_dropout_p,
                         gm_warp_dropout_p = gm_warp_dropout_p)
         return WarpHead(decoder, patch_size)
+    
     else:
         raise NotImplementedError(
             f"unexpected {head_type=}")
+
+

@@ -46,7 +46,6 @@ def loss_of_one_batch(batch, model, criterion, device, symmetrize_batch=False, u
         warnings.filterwarnings("ignore", category=FutureWarning)
         with torch.cuda.amp.autocast(enabled=bool(use_amp)):
             corresps = model(view1, view2)
-
             # loss is supposed to be symmetric
             with torch.cuda.amp.autocast(enabled=False):
                 loss = criterion(view1, view2, corresps) if criterion is not None else None
@@ -54,6 +53,33 @@ def loss_of_one_batch(batch, model, criterion, device, symmetrize_batch=False, u
     result = dict(view1=view1, view2=view2, corresps=corresps, loss=loss)
     return result[ret] if ret else result
 
+def loss_of_one_batch_upsample(batch, upsample_batch, model, criterion, device, use_amp=False, ret=None):
+    view1, view2 = batch
+    ignore_keys = set(['pts3d', 'dataset', 'label', 'instance', 'idx', 'true_shape', 'rng'])
+    for view in batch:
+        for name in view.keys():  # pseudo_focal
+            if name in ignore_keys:
+                continue
+            view[name] = view[name].to(device, non_blocking=True)
+    view1_upsample, view2_upsample = upsample_batch
+    for view in upsample_batch:
+        for name in view.keys():  # pseudo_focal
+            if name in ignore_keys:
+                continue
+            view[name] = view[name].to(device, non_blocking=True)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=FutureWarning)
+        with torch.cuda.amp.autocast(enabled=bool(use_amp)):
+            low_corresps = model(view1, view2)
+            finest_corresps = low_corresps[1]
+            corresps = model.match(view1_upsample, view2_upsample, finest_corresps)
+            # loss is supposed to be symmetric
+            with torch.cuda.amp.autocast(enabled=False):
+                loss = criterion(view1_upsample, view2_upsample, corresps) if criterion is not None else None
+            
+    result = dict(view1=view1_upsample, view2=view2_upsample, corresps=corresps, loss=loss, low_corresps=low_corresps)
+    return result[ret] if ret else result
 
 @torch.no_grad()
 def inference(pairs, model, device, batch_size=8, verbose=True):
@@ -74,6 +100,62 @@ def inference(pairs, model, device, batch_size=8, verbose=True):
 
     return result
 
+@torch.no_grad()
+def inference_upsample(pairs, upsample_pairs, model, device, batch_size=8, verbose=True):
+    if verbose:
+        print(f'>> Inference with model on {len(pairs)} image pairs')
+    result = []
+
+    # first, check if all images have the same size
+    multiple_shapes = not (check_if_same_size(pairs)) or not (check_if_same_size(upsample_pairs))
+    if multiple_shapes:  # force bs=1
+        batch_size = 1
+
+    for i in tqdm.trange(0, len(pairs), batch_size, disable=not verbose):
+        res = loss_of_one_batch_upsample(collate_with_cat(pairs[i:i + batch_size]), collate_with_cat(upsample_pairs[i:i + batch_size]), model, None, device)
+        result.append(to_cpu(res))
+
+    result = collate_with_cat(result, lists=multiple_shapes)
+
+    return result
+
+@torch.no_grad()
+def inference_cuda(pairs, model, device, batch_size=8, verbose=True):
+    if verbose:
+        print(f'>> Inference with model on {len(pairs)} image pairs')
+    result = []
+
+    # first, check if all images have the same size
+    multiple_shapes = not (check_if_same_size(pairs))
+    if multiple_shapes:  # force bs=1
+        batch_size = 1
+
+    for i in tqdm.trange(0, len(pairs), batch_size, disable=not verbose):
+        res = loss_of_one_batch(collate_with_cat(pairs[i:i + batch_size]), model, None, device)
+        result.append(res)
+
+    result = collate_with_cat(result, lists=multiple_shapes)
+
+    return result
+
+
+@torch.no_grad()
+def inference_upsample_cuda(pairs, upsample_pairs, model, device, batch_size=8, verbose=True):
+    if verbose:
+        print(f'>> Inference with model on {len(pairs)} image pairs')
+    result = []
+
+    # first, check if all images have the same size
+    multiple_shapes = not (check_if_same_size(pairs)) or not (check_if_same_size(upsample_pairs))
+    if multiple_shapes:  # force bs=1
+        batch_size = 1
+
+    for i in tqdm.trange(0, len(pairs), batch_size, disable=not verbose):
+        res = loss_of_one_batch_upsample(collate_with_cat(pairs[i:i + batch_size]), collate_with_cat(upsample_pairs[i:i + batch_size]), model, None, device)
+        result.append(res)
+
+    result = collate_with_cat(result, lists=multiple_shapes)
+    return result
 
 def check_if_same_size(pairs):
     shapes1 = [img1['img'].shape[-2:] for img1, img2 in pairs]

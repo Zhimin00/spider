@@ -1,422 +1,746 @@
 import torch
+import torch.nn.functional as F
 import numpy as np
-import tqdm
-from romatch.datasets import MegadepthBuilder, Aerial_MegaDepth
-from romatch.utils import warp_kpts, depthmap_to_absolute_camera_coordinates
-from torch.utils.data import ConcatDataset
-import romatch
+from tqdm import tqdm
+import os
+import os.path as osp
+import cv2
 import pdb
-from dust3r.utils.geometry import inv, geotrf, normalize_pointcloud
-from dust3r.image_pairs import make_pairs
-from dust3r.inference import inference
-from mast3r.fast_nn import fast_reciprocal_NNs
-from dust3r.utils.geometry import geotrf
-from dust3r.utils.device import collate_with_cat
+from spider.utils.utils import compute_relative_pose, estimate_pose, compute_pose_error, pose_auc, match_symmetric, match_symmetric_upsample, sample_symmetric, to_pixel_coordinates, make_symmetric_pairs, tensor_to_pil
+from spider.utils.image import load_images_with_intrinsics, load_two_images_with_H
+from spider.inference import inference, inference_upsample
+from PIL import Image
+class AerialMegaDepthPoseEstimationBenchmark:
+    def __init__(self, data_root="data/megadepth") -> None:
+        self.data_root = data_root
+        with np.load(os.path.join(self.data_root, 'aerial_megadepth_test_scenes0015_0022.npz'), allow_pickle=True) as data:
+            self.all_scenes = data['scenes']
+            self.all_images = data['images']
+            self.pairs = data['pairs']
 
-class MegadepthDenseBenchmark:
-    def __init__(self, data_root="data/megadepth", h = 384, w = 512, num_samples = 2000) -> None:
-        mega = MegadepthBuilder(data_root=data_root)
-        self.dataset = ConcatDataset(
-            mega.build_scenes(split="test_loftr", ht=h, wt=w)
-        )  # fixed resolution of 384,512
-        self.num_samples = num_samples
-
-    def geometric_dist(self, depth1, depth2, T_1to2, K1, K2, dense_matches):
-        b, h1, w1, d = dense_matches.shape
-        with torch.no_grad():
-            x1 = dense_matches[..., :2].reshape(b, h1 * w1, 2)
-            mask, x2 = warp_kpts(
-                x1.double(),
-                depth1.double(),
-                depth2.double(),
-                T_1to2.double(),
-                K1.double(),
-                K2.double(),
-            )
-            x2 = torch.stack(
-                (w1 * (x2[..., 0] + 1) / 2, h1 * (x2[..., 1] + 1) / 2), dim=-1
-            )
-            prob = mask.float().reshape(b, h1, w1)
-        x2_hat = dense_matches[..., 2:]
-        x2_hat = torch.stack(
-            (w1 * (x2_hat[..., 0] + 1) / 2, h1 * (x2_hat[..., 1] + 1) / 2), dim=-1
-        )
-        gd = (x2_hat - x2.reshape(b, h1, w1, 2)).norm(dim=-1)
-        gd = gd[prob == 1]
-        pck_1 = (gd < 1.0).float().mean()
-        pck_3 = (gd < 3.0).float().mean()
-        pck_5 = (gd < 5.0).float().mean()
-        return gd, pck_1, pck_3, pck_5, prob
-
-    def benchmark(self, model, batch_size=8):
-        model.train(False)
-        with torch.no_grad():
-            gd_tot = 0.0
-            pck_1_tot = 0.0
-            pck_3_tot = 0.0
-            pck_5_tot = 0.0
-            sampler = torch.utils.data.WeightedRandomSampler(
-                torch.ones(len(self.dataset)), replacement=False, num_samples=self.num_samples
-            )
-            B = batch_size
-            dataloader = torch.utils.data.DataLoader(
-                self.dataset, batch_size=B, num_workers=batch_size, sampler=sampler
-            )
-            for idx, data in tqdm.tqdm(enumerate(dataloader), disable = romatch.RANK > 0):
-                im_A, im_B, depth1, depth2, T_1to2, K1, K2 = (
-                    data["im_A"].cuda(),
-                    data["im_B"].cuda(),
-                    data["im_A_depth"].cuda(),
-                    data["im_B_depth"].cuda(),
-                    data["T_1to2"].cuda(),
-                    data["K1"].cuda(),
-                    data["K2"].cuda(),
-                )
-                matches, certainty = model.match(im_A, im_B, batched=True)
-                gd, pck_1, pck_3, pck_5, prob = self.geometric_dist(
-                    depth1, depth2, T_1to2, K1, K2, matches
-                )
-                if romatch.DEBUG_MODE:
-                    from romatch.utils.utils import tensor_to_pil
-                    import torch.nn.functional as F
-                    path = "vis"
-                    H, W = model.get_output_resolution()
-                    white_im = torch.ones((B,1,H,W),device="cuda")
-                    im_B_transfer_rgb = F.grid_sample(
-                        im_B.cuda(), matches[:,:,:W, 2:], mode="bilinear", align_corners=False
-                    )
-                    warp_im = im_B_transfer_rgb
-                    c_b = certainty[:,None]#(certainty*0.9 + 0.1*torch.ones_like(certainty))[:,None]
-                    vis_im = c_b * warp_im + (1 - c_b) * white_im
-                    for b in range(B):
-                        import os
-                        os.makedirs(f"{path}/{model.name}/{idx}_{b}_{H}_{W}",exist_ok=True)
-                        tensor_to_pil(vis_im[b], unnormalize=True).save(
-                            f"{path}/{model.name}/{idx}_{b}_{H}_{W}/warp.jpg")
-                        tensor_to_pil(im_A[b].cuda(), unnormalize=True).save(
-                            f"{path}/{model.name}/{idx}_{b}_{H}_{W}/im_A.jpg")
-                        tensor_to_pil(im_B[b].cuda(), unnormalize=True).save(
-                            f"{path}/{model.name}/{idx}_{b}_{H}_{W}/im_B.jpg")
-
-
-                gd_tot, pck_1_tot, pck_3_tot, pck_5_tot = (
-                    gd_tot + gd.mean(),
-                    pck_1_tot + pck_1,
-                    pck_3_tot + pck_3,
-                    pck_5_tot + pck_5,
-                )
-        return {
-            "epe": gd_tot.item() / len(dataloader),
-            "mega_pck_1": pck_1_tot.item() / len(dataloader),
-            "mega_pck_3": pck_3_tot.item() / len(dataloader),
-            "mega_pck_5": pck_5_tot.item() / len(dataloader),
-        }
-
-    def benchmark_adapter(self, model, batch_size=8):
-        model.train(False)
-        with torch.no_grad():
-            gd_tot = 0.0
-            pck_1_tot = 0.0
-            pck_3_tot = 0.0
-            pck_5_tot = 0.0
-            sampler = torch.utils.data.WeightedRandomSampler(
-                torch.ones(len(self.dataset)), replacement=False, num_samples=self.num_samples
-            )
-            B = batch_size
-            dataloader = torch.utils.data.DataLoader(
-                self.dataset, batch_size=B, num_workers=batch_size, sampler=sampler
-            )
-            for idx, data in tqdm.tqdm(enumerate(dataloader), disable = romatch.RANK > 0):
-                im_A, im_B, depth1, depth2, T_1to2, K1, K2, domainid = (
-                    data["im_A"].cuda(),
-                    data["im_B"].cuda(),
-                    data["im_A_depth"].cuda(),
-                    data["im_B_depth"].cuda(),
-                    data["T_1to2"].cuda(),
-                    data["K1"].cuda(),
-                    data["K2"].cuda(),
-                    data['domainid'].cuda(),
-                )
-                matches, certainty = model.match(im_A, im_B, domainid, batched=True)
-                gd, pck_1, pck_3, pck_5, prob = self.geometric_dist(
-                    depth1, depth2, T_1to2, K1, K2, matches
-                )
-                if romatch.DEBUG_MODE:
-                    from romatch.utils.utils import tensor_to_pil
-                    import torch.nn.functional as F
-                    path = "vis"
-                    H, W = model.get_output_resolution()
-                    white_im = torch.ones((B,1,H,W),device="cuda")
-                    im_B_transfer_rgb = F.grid_sample(
-                        im_B.cuda(), matches[:,:,:W, 2:], mode="bilinear", align_corners=False
-                    )
-                    warp_im = im_B_transfer_rgb
-                    c_b = certainty[:,None]#(certainty*0.9 + 0.1*torch.ones_like(certainty))[:,None]
-                    vis_im = c_b * warp_im + (1 - c_b) * white_im
-                    for b in range(B):
-                        import os
-                        os.makedirs(f"{path}/{model.name}/{idx}_{b}_{H}_{W}",exist_ok=True)
-                        tensor_to_pil(vis_im[b], unnormalize=True).save(
-                            f"{path}/{model.name}/{idx}_{b}_{H}_{W}/warp.jpg")
-                        tensor_to_pil(im_A[b].cuda(), unnormalize=True).save(
-                            f"{path}/{model.name}/{idx}_{b}_{H}_{W}/im_A.jpg")
-                        tensor_to_pil(im_B[b].cuda(), unnormalize=True).save(
-                            f"{path}/{model.name}/{idx}_{b}_{H}_{W}/im_B.jpg")
-
-
-                gd_tot, pck_1_tot, pck_3_tot, pck_5_tot = (
-                    gd_tot + gd.mean(),
-                    pck_1_tot + pck_1,
-                    pck_3_tot + pck_3,
-                    pck_5_tot + pck_5,
-                )
-        return {
-            "epe": gd_tot.item() / len(dataloader),
-            "mega_pck_1": pck_1_tot.item() / len(dataloader),
-            "mega_pck_3": pck_3_tot.item() / len(dataloader),
-            "mega_pck_5": pck_5_tot.item() / len(dataloader),
-        }
-
-class AerialMegadepthDenseBenchmark:
-    def __init__(self, data_root='/cis/net/io99a/data/zshao/megadepth_aerial_data/megadepth/megadepth_aerial_processed', h = 384, w = 512, num_samples = 2000) -> None:
-        self.dataset = Aerial_MegaDepth(data_root, 'val', ht=h,wt=w,) # fixed resolution of 384,512
-        self.num_samples = num_samples
-
-    def geometric_dist(self, depth1, depth2, T_1to2, K1, K2, dense_matches):
-        b, h1, w1, d = dense_matches.shape
-        with torch.no_grad():
-            x1 = dense_matches[..., :2].reshape(b, h1 * w1, 2)
-            mask, x2 = warp_kpts(
-                x1.double(),
-                depth1.double(),
-                depth2.double(),
-                T_1to2.double(),
-                K1.double(),
-                K2.double(),
-            )
-            x2 = torch.stack(
-                (w1 * (x2[..., 0] + 1) / 2, h1 * (x2[..., 1] + 1) / 2), dim=-1
-            )
-            prob = mask.float().reshape(b, h1, w1)
-        x2_hat = dense_matches[..., 2:]
-        x2_hat = torch.stack(
-            (w1 * (x2_hat[..., 0] + 1) / 2, h1 * (x2_hat[..., 1] + 1) / 2), dim=-1
-        )
-        gd = (x2_hat - x2.reshape(b, h1, w1, 2)).norm(dim=-1)
-        gd = gd[prob == 1]
-        pck_1 = (gd < 1.0).float().mean()
-        pck_3 = (gd < 3.0).float().mean()
-        pck_5 = (gd < 5.0).float().mean()
-        return gd, pck_1, pck_3, pck_5, prob
-
-    def benchmark(self, model, batch_size=8):
-        model.train(False)
-        with torch.no_grad():
-            gd_tot = 0.0
-            pck_1_tot = 0.0
-            pck_3_tot = 0.0
-            pck_5_tot = 0.0
-            sampler = torch.utils.data.WeightedRandomSampler(
-                torch.ones(len(self.dataset)), replacement=False, num_samples=self.num_samples
-            )
-            B = batch_size
-            dataloader = torch.utils.data.DataLoader(
-                self.dataset, batch_size=B, num_workers=batch_size, sampler=sampler
-            )
-            for idx, data in tqdm.tqdm(enumerate(dataloader), disable = romatch.RANK > 0):
-                im_A, im_B, depth1, depth2, T_1to2, K1, K2 = (
-                    data["im_A"].cuda(),
-                    data["im_B"].cuda(),
-                    data["im_A_depth"].cuda(),
-                    data["im_B_depth"].cuda(),
-                    data["T_1to2"].cuda(),
-                    data["K1"].cuda(),
-                    data["K2"].cuda(),
-                )
-                matches, certainty = model.match(im_A, im_B, batched=True)
-                gd, pck_1, pck_3, pck_5, prob = self.geometric_dist(
-                    depth1, depth2, T_1to2, K1, K2, matches
-                )
-                if romatch.DEBUG_MODE:
-                    from romatch.utils.utils import tensor_to_pil
-                    import torch.nn.functional as F
-                    path = "vis"
-                    H, W = model.get_output_resolution()
-                    white_im = torch.ones((B,1,H,W),device="cuda")
-                    im_B_transfer_rgb = F.grid_sample(
-                        im_B.cuda(), matches[:,:,:W, 2:], mode="bilinear", align_corners=False
-                    )
-                    warp_im = im_B_transfer_rgb
-                    c_b = certainty[:,None]#(certainty*0.9 + 0.1*torch.ones_like(certainty))[:,None]
-                    vis_im = c_b * warp_im + (1 - c_b) * white_im
-                    for b in range(B):
-                        import os
-                        os.makedirs(f"{path}/{model.name}/{idx}_{b}_{H}_{W}",exist_ok=True)
-                        tensor_to_pil(vis_im[b], unnormalize=True).save(
-                            f"{path}/{model.name}/{idx}_{b}_{H}_{W}/warp.jpg")
-                        tensor_to_pil(im_A[b].cuda(), unnormalize=True).save(
-                            f"{path}/{model.name}/{idx}_{b}_{H}_{W}/im_A.jpg")
-                        tensor_to_pil(im_B[b].cuda(), unnormalize=True).save(
-                            f"{path}/{model.name}/{idx}_{b}_{H}_{W}/im_B.jpg")
-
-
-                gd_tot, pck_1_tot, pck_3_tot, pck_5_tot = (
-                    gd_tot + gd.mean(),
-                    pck_1_tot + pck_1,
-                    pck_3_tot + pck_3,
-                    pck_5_tot + pck_5,
-                )
-        return {
-            "epe": gd_tot.item() / len(dataloader),
-            "mega_pck_1": pck_1_tot.item() / len(dataloader),
-            "mega_pck_3": pck_3_tot.item() / len(dataloader),
-            "mega_pck_5": pck_5_tot.item() / len(dataloader),
-        }
+    def load_intrinsics_and_pose(self, npz_path):
+        camera_params = np.load(npz_path)
+        K = camera_params["intrinsics"].astype(np.float32)
+        T = camera_params["cam2world"].astype(np.float32)
+        T_inv = np.linalg.inv(T)  
+        return K, T_inv
     
-class MegadepthDenseBenchmark_depth:
-    def __init__(self, data_root="data/megadepth", h = 384, w = 512, num_samples = 2000) -> None:
-        mega = MegadepthBuilder(data_root=data_root)
-        self.dataset = ConcatDataset(
-            mega.build_scenes(split="test_loftr", ht=h, wt=w)
-        )  # fixed resolution of 384,512
-        self.num_samples = num_samples
-
-    def geometric_dist(self, depth1, depth2, T_1to2, K1, K2, dense_matches):
-        b, h1, w1, d = dense_matches.shape
+    
+    def benchmark(self, model, device='cuda', model_name = 'spider', debug=False):
         with torch.no_grad():
-            x1 = dense_matches[..., :2].reshape(b, h1 * w1, 2)
-            mask, x2 = warp_kpts(
-                x1.double(),
-                depth1.double(),
-                depth2.double(),
-                T_1to2.double(),
-                K1.double(),
-                K2.double(),
-            )
-            x2 = torch.stack(
-                (w1 * (x2[..., 0] + 1) / 2, h1 * (x2[..., 1] + 1) / 2), dim=-1
-            )
-            prob = mask.float().reshape(b, h1, w1)
-        x2_hat = dense_matches[..., 2:]
-        x2_hat = torch.stack(
-            (w1 * (x2_hat[..., 0] + 1) / 2, h1 * (x2_hat[..., 1] + 1) / 2), dim=-1
-        )
-        gd = (x2_hat - x2.reshape(b, h1, w1, 2)).norm(dim=-1)
-        gd = gd[prob == 1]
-        pck_1 = (gd < 1.0).float().mean()
-        pck_3 = (gd < 3.0).float().mean()
-        pck_5 = (gd < 5.0).float().mean()
-        return gd, pck_1, pck_3, pck_5, prob
-    def depth_dist(self, depth1, depth2, K1, K2, T1, T2, pts1, pts_conf1, pts2, pts_conf2):
-        gt_pts1, gt_valid1 = depthmap_to_absolute_camera_coordinates(depth1, K1, T1)
-        gt_pts2, gt_valid2 = depthmap_to_absolute_camera_coordinates(depth2, K2, T2)
+            data_root = self.data_root
+            tot_e_t, tot_e_R, tot_e_pose = [], [], []
+            thresholds = [5, 10, 20]
+
+            pair_inds = range(len(self.pairs))
+            for pairind in tqdm(pair_inds):
+                scene_id, idx1, idx2, score = self.pairs[pairind]
+
+                scene = self.all_scenes[scene_id]
+                seq_path = f"{data_root}/{scene}"
+                im_A_name, im_B_name = self.all_images[idx1], self.all_images[idx2]
+                
+                ## load camera parameters
+                K1_ori, T1 = self.load_intrinsics_and_pose(os.path.join(seq_path, im_A_name + ".npz"))
+                R1, t1 = T1[:3, :3], T1[:3, 3]
+                K2_ori, T2 = self.load_intrinsics_and_pose(os.path.join(seq_path, im_B_name + ".npz"))
+                R2, t2 = T2[:3, :3], T2[:3, 3]
+                R, t = compute_relative_pose(R1, t1, R2, t2)
+                T1_to_2 = np.concatenate((R,t[:,None]), axis=-1)
+                
+                im_A_path = f"{seq_path}/{im_A_name}.jpg"
+                im_B_path = f"{seq_path}/{im_B_name}.jpg"
+
+                imgs, _ = load_images_with_intrinsics([im_A_path, im_B_path], size=512, intrinsics=None)
+                # # if np.all(imgs[0]['true_shape'] == imgs[1]['true_shape']):
+                # #     continue
+                # image_pairs = make_symmetric_pairs(imgs)
+                # res = inference(image_pairs, model, device, batch_size=1, verbose=True)
+                # warp1, certainty1, warp2, certainty2 = match_symmetric(res['corresps'])
+                imgs_large, intrinsics = load_images_with_intrinsics([im_A_path, im_B_path], size=1344, intrinsics=[K1_ori, K2_ori])
+                image_pairs = make_symmetric_pairs(imgs)
+                image_large_pairs = make_symmetric_pairs(imgs_large)
+                res = inference_upsample(image_pairs, image_large_pairs, model, device, batch_size=1, verbose=True)
+                
+                warp1, certainty1, warp2, certainty2 = match_symmetric_upsample(res['corresps'], res['low_corresps'])
+                sparse_matches, _ = sample_symmetric(warp1, certainty1, warp2, certainty2, num=5000)
+                if debug:
+                    from matplotlib import pyplot as pl
+                    save_dir = '/cis/home/zshao14/Downloads/spider/assets/aerialmega_benchmark'
+                    os.makedirs(save_dir, exist_ok=True)
+                    view1, view2 = res['view1'], res['view2']
+                    image_mean = torch.as_tensor([0.5, 0.5, 0.5], device='cpu').reshape(1, 3, 1, 1)
+                    image_std = torch.as_tensor([0.5, 0.5, 0.5], device='cpu').reshape(1, 3, 1, 1)
+
+                    viz_imgs = []
+                    for i, view in enumerate([view1, view2]):
+                        rgb_tensor = view['img'][0] * image_std + image_mean
+                        viz_imgs.append(rgb_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy())
+
+                    H0, W0, H1, W1 = *viz_imgs[0].shape[:2], *viz_imgs[1].shape[:2]
+                    kpts1, kpts2 = to_pixel_coordinates(sparse_matches, H0, W0, H1, W1)
+                    matches_im0, matches_im1 = kpts1.cpu().numpy(), kpts2.cpu().numpy()
+                    
+                    valid_matches_im0 = (matches_im0[:, 0] >= 3) & (matches_im0[:, 0] < int(W0) - 3) & (
+                        matches_im0[:, 1] >= 3) & (matches_im0[:, 1] < int(H0) - 3)
+
+                    valid_matches_im1 = (matches_im1[:, 0] >= 3) & (matches_im1[:, 0] < int(W1) - 3) & (
+                        matches_im1[:, 1] >= 3) & (matches_im1[:, 1] < int(H1) - 3)
+
+                    valid_matches = valid_matches_im0 & valid_matches_im1
+                    matches_im0, matches_im1 = matches_im0[valid_matches], matches_im1[valid_matches]
+
+                    num_matches = len(matches_im0)
+                    n_viz = 20
+                    match_idx_to_viz = np.round(np.linspace(0, num_matches - 1, n_viz)).astype(int)
+                    viz_matches_im0, viz_matches_im1 = matches_im0[match_idx_to_viz], matches_im1[match_idx_to_viz]
+                    img0 = np.pad(viz_imgs[0], ((0, max(H1 - H0, 0)), (0, 0), (0, 0)), 'constant', constant_values=0)
+                    img1 = np.pad(viz_imgs[1], ((0, max(H0 - H1, 0)), (0, 0), (0, 0)), 'constant', constant_values=0)
+                    img = np.concatenate((img0, img1), axis=1)
+                    pl.figure()
+                    pl.imshow(img)
+                    pl.axis('off')  
+                    pl.savefig(os.path.join(save_dir, 'raw.png'), dpi=300, bbox_inches='tight')
+                    pl.close()
+
+                    
+                    pl.figure()
+                    pl.imshow(img)
+                    cmap = pl.get_cmap('jet')
+
+
+                    for i in range(n_viz):
+                        (x0, y0), (x1, y1) = viz_matches_im0[i].T, viz_matches_im1[i].T
+                        pl.plot([x0, x1 + W0], [y0, y1], '-+', color=cmap(i / (n_viz - 1)), scalex=False, scaley=False)
+                    # pl.show(block=True)
+                    pl.savefig(os.path.join(save_dir, 'matches.png'), dpi=300, bbox_inches='tight')
+                    pl.close()
+                    im2_transfer_rgb = F.grid_sample(
+                        view2['img'][0][None], warp1[:,:, 2:][None], mode="bilinear", align_corners=False
+                        )[0] ###H1, W1
+                    im1_transfer_rgb = F.grid_sample(
+                        view1['img'][0][None], warp2[:, :, :2][None], mode="bilinear", align_corners=False
+                        )[0] ###H2, W2
+                    white_im1 = torch.ones((H0,W0))
+                    white_im2 = torch.ones((H1,W1))
+                    vis_im1 = certainty1 * im2_transfer_rgb + (1 - certainty1) * white_im1
+                    vis_im2 = certainty2 * im1_transfer_rgb + (1 - certainty2) * white_im2
+                    tensor_to_pil(vis_im1, unnormalize=False).save(os.path.join(save_dir, f'warp_im1.jpg'))
+                    tensor_to_pil(vis_im2, unnormalize=False).save(os.path.join(save_dir, f'warp_im2.jpg'))
+
+                K1, K2 = intrinsics
+                h1, w1 = image_large_pairs[0][0]['true_shape'][0]
+                h2, w2 = image_large_pairs[0][1]['true_shape'][0]
+                if True: # Note: we keep this true as it was used in DKM/RoMa papers. There is very little difference compared to setting to False. 
+                    scale1 = 1200 / max(w1, h1)
+                    scale2 = 1200 / max(w2, h2)
+                    w1, h1 = scale1 * w1, scale1 * h1
+                    w2, h2 = scale2 * w2, scale2 * h2
+                    K1, K2 = K1.copy(), K2.copy()
+                    K1[:2] = K1[:2] * scale1
+                    K2[:2] = K2[:2] * scale2
+
+                kpts1, kpts2 = to_pixel_coordinates(sparse_matches, h1, w1, h2, w2)
+                kpts1, kpts2 = kpts1.cpu().numpy(), kpts2.cpu().numpy()
+                for _ in range(5):
+                    shuffling = np.random.permutation(np.arange(len(kpts1)))
+                    kpts1 = kpts1[shuffling]
+                    kpts2 = kpts2[shuffling]
+                    try:
+                        threshold = 0.5 
+                        norm_threshold = threshold / (np.mean(np.abs(K1[:2, :2])) + np.mean(np.abs(K2[:2, :2])))
+                        R_est, t_est, mask = estimate_pose(
+                            kpts1,
+                            kpts2,
+                            K1,
+                            K2,
+                            norm_threshold,
+                            conf=0.99999,
+                        )
+                        T1_to_2_est = np.concatenate((R_est, t_est), axis=-1)  #
+                        e_t, e_R = compute_pose_error(T1_to_2_est, R, t)
+                        e_pose = max(e_t, e_R)
+                    except Exception as e:
+                        print(repr(e))
+                        e_t, e_R = 90, 90
+                        e_pose = max(e_t, e_R)
+                    tot_e_t.append(e_t)
+                    tot_e_R.append(e_R)
+                    tot_e_pose.append(e_pose)
+                # pdb.set_trace()
+            tot_e_pose = np.array(tot_e_pose)
+            auc = pose_auc(tot_e_pose, thresholds)
+            acc_5 = (tot_e_pose < 5).mean()
+            acc_10 = (tot_e_pose < 10).mean()
+            acc_15 = (tot_e_pose < 15).mean()
+            acc_20 = (tot_e_pose < 20).mean()
+            map_5 = acc_5
+            map_10 = np.mean([acc_5, acc_10])
+            map_20 = np.mean([acc_5, acc_10, acc_15, acc_20])
+            print(f"{model_name} auc: {auc}")
+            return {
+                "auc_5": auc[0],
+                "auc_10": auc[1],
+                "auc_20": auc[2],
+                "map_5": map_5,
+                "map_10": map_10,
+                "map_20": map_20,
+            }
+
+class MegaDepthPoseEstimationBenchmark:
+    def __init__(self, data_root="data/megadepth", scene_names = None) -> None:
+        if scene_names is None:
+            self.scene_names = [
+                "0015_0.1_0.3.npz",
+                "0015_0.3_0.5.npz",
+                "0022_0.1_0.3.npz",
+                "0022_0.3_0.5.npz",
+                "0022_0.5_0.7.npz",
+            ]
+        else:
+            self.scene_names = scene_names
+        self.scenes = [
+            np.load(f"{data_root}/{scene}", allow_pickle=True)
+            for scene in self.scene_names
+        ]
+        self.data_root = data_root
+
+    def benchmark(self, model, device='cuda', model_name = 'spider', debug=False):
         with torch.no_grad():
-            in_camera1 = inv(T1)
-            gt_pts1 = geotrf(in_camera1, gt_pts1)  # B,H,W,3
-            gt_pts2 = geotrf(in_camera1, gt_pts2)  # B,H,W,3
-            valid1 = gt_valid1.clone() # B,H,W
-            valid2 = gt_valid2.clone()
-            pr_pts1, pr_pts2 = normalize_pointcloud(pts1, pts2, 'avg_dis', valid1, valid2)
-            gt_pts1, gt_pts2 = normalize_pointcloud(gt_pts1, gt_pts2, 'avg_dis', valid1, valid2)
-            gd1 = (pr_pts1 - gt_pts1).norm(dim=-1)
-            gd1 = gd1[valid1 == 1]
-            gd2 = (pr_pts2 - gt_pts2).norm(dim=-1)
-            gd2 = gd2[valid2 == 1]
+            data_root = self.data_root
+            tot_e_t, tot_e_R, tot_e_pose = [], [], []
+            thresholds = [5, 10, 20]
+            for scene_ind in range(len(self.scenes)):
+                import os
+                scene_name = os.path.splitext(self.scene_names[scene_ind])[0]
+                scene = self.scenes[scene_ind]
+                pairs = scene["pair_infos"]
+                intrinsics = scene["intrinsics"]
+                poses = scene["poses"]
+                im_paths = scene["image_paths"]
+                pair_inds = range(len(pairs))
+                for pairind in tqdm(pair_inds):
+                    idx1, idx2 = pairs[pairind][0]
+                    K1_ori = intrinsics[idx1].copy()
+                    T1 = poses[idx1].copy()
+                    R1, t1 = T1[:3, :3], T1[:3, 3]
+                    K2_ori = intrinsics[idx2].copy()
+                    T2 = poses[idx2].copy()
+                    R2, t2 = T2[:3, :3], T2[:3, 3]
+                    R, t = compute_relative_pose(R1, t1, R2, t2)
+                    T1_to_2 = np.concatenate((R,t[:,None]), axis=-1)
+                    im_A_path = f"{data_root}/{im_paths[idx1]}"
+                    im_B_path = f"{data_root}/{im_paths[idx2]}"
+                    
+                    imgs, _ = load_images_with_intrinsics([im_A_path, im_B_path], size=512, intrinsics=None)
+                    # # if np.all(imgs[0]['true_shape'] == imgs[1]['true_shape']):
+                    # #     continue
+                    # image_pairs = make_symmetric_pairs(imgs)
+                    # res = inference(image_pairs, model, device, batch_size=1, verbose=True)
+                    # warp1, certainty1, warp2, certainty2 = match_symmetric(res['corresps'])
+                    imgs_large, new_intrinsics = load_images_with_intrinsics([im_A_path, im_B_path], size=1344, intrinsics=[K1_ori, K2_ori])
+                    image_pairs = make_symmetric_pairs(imgs)
+                    image_large_pairs = make_symmetric_pairs(imgs_large)
+                    res = inference_upsample(image_pairs, image_large_pairs, model, device, batch_size=1, verbose=True)
+                    warp1, certainty1, warp2, certainty2 = match_symmetric_upsample(res['corresps'], res['low_corresps'])
+                    sparse_matches, _ = sample_symmetric(warp1, certainty1, warp2, certainty2, num=5000)
+                    K1, K2 = new_intrinsics
+                    h1, w1 = imgs_large[0]['true_shape'][0]
+                    h2, w2 = imgs_large[1]['true_shape'][0]
+                    if debug:
+                        from matplotlib import pyplot as pl
+                        save_dir = '/cis/home/zshao14/Downloads/spider/assets/mega_benchmark'
+                        os.makedirs(save_dir, exist_ok=True)
+                        view1, view2 = res['view1'], res['view2']
+                        image_mean = torch.as_tensor([0.5, 0.5, 0.5], device='cpu').reshape(1, 3, 1, 1)
+                        image_std = torch.as_tensor([0.5, 0.5, 0.5], device='cpu').reshape(1, 3, 1, 1)
 
-            pck1_1 = (gd1 < 1.0).float().mean()
-            pck1_3 = (gd1 < 3.0).float().mean()
-            pck1_5 = (gd1 < 5.0).float().mean()
-            pck2_1 = (gd2 < 1.0).float().mean()
-            pck2_3 = (gd2 < 3.0).float().mean()
-            pck2_5 = (gd2 < 5.0).float().mean()
-            return gd1, pck1_1, pck1_3, pck1_5, valid1, gd2, pck2_1, pck2_3, pck2_5, valid2
+                        viz_imgs = []
+                        for i, view in enumerate([view1, view2]):
+                            rgb_tensor = view['img'][0] * image_std + image_mean
+                            viz_imgs.append(rgb_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy())
 
-    def benchmark(self, model, batch_size=8):
+                        H0, W0, H1, W1 = *viz_imgs[0].shape[:2], *viz_imgs[1].shape[:2]
+                        kpts1, kpts2 = to_pixel_coordinates(sparse_matches, H0, W0, H1, W1)
+                        matches_im0, matches_im1 = kpts1.cpu().numpy(), kpts2.cpu().numpy()
+                        
+                        valid_matches_im0 = (matches_im0[:, 0] >= 3) & (matches_im0[:, 0] < int(W0) - 3) & (
+                            matches_im0[:, 1] >= 3) & (matches_im0[:, 1] < int(H0) - 3)
+
+                        valid_matches_im1 = (matches_im1[:, 0] >= 3) & (matches_im1[:, 0] < int(W1) - 3) & (
+                            matches_im1[:, 1] >= 3) & (matches_im1[:, 1] < int(H1) - 3)
+
+                        valid_matches = valid_matches_im0 & valid_matches_im1
+                        matches_im0, matches_im1 = matches_im0[valid_matches], matches_im1[valid_matches]
+
+                        num_matches = len(matches_im0)
+                        n_viz = 20
+                        match_idx_to_viz = np.round(np.linspace(0, num_matches - 1, n_viz)).astype(int)
+                        viz_matches_im0, viz_matches_im1 = matches_im0[match_idx_to_viz], matches_im1[match_idx_to_viz]
+                        img0 = np.pad(viz_imgs[0], ((0, max(H1 - H0, 0)), (0, 0), (0, 0)), 'constant', constant_values=0)
+                        img1 = np.pad(viz_imgs[1], ((0, max(H0 - H1, 0)), (0, 0), (0, 0)), 'constant', constant_values=0)
+                        img = np.concatenate((img0, img1), axis=1)
+                        pl.figure()
+                        pl.imshow(img)
+                        pl.axis('off')  
+                        pl.savefig(os.path.join(save_dir, 'raw.png'), dpi=300, bbox_inches='tight')
+                        pl.close()
+
+
+                        pl.figure()
+                        pl.imshow(img)
+                        cmap = pl.get_cmap('jet')
+                        for i in range(n_viz):
+                            (x0, y0), (x1, y1) = viz_matches_im0[i].T, viz_matches_im1[i].T
+                            pl.plot([x0, x1 + W0], [y0, y1], '-+', color=cmap(i / (n_viz - 1)), scalex=False, scaley=False)
+                        # pl.show(block=True)
+                        pl.savefig(os.path.join(save_dir, 'matches.png'), dpi=300, bbox_inches='tight')
+                        pl.close()
+                        im2_transfer_rgb = F.grid_sample(
+                            view2['img'][0][None], warp1[:,:, 2:][None], mode="bilinear", align_corners=False
+                            )[0] ###H1, W1
+                        im1_transfer_rgb = F.grid_sample(
+                            view1['img'][0][None], warp2[:, :, :2][None], mode="bilinear", align_corners=False
+                            )[0] ###H2, W2
+                        white_im1 = torch.ones((H0,W0))
+                        white_im2 = torch.ones((H1,W1))
+                        vis_im1 = certainty1 * im2_transfer_rgb + (1 - certainty1) * white_im1
+                        vis_im2 = certainty2 * im1_transfer_rgb + (1 - certainty2) * white_im2
+                        tensor_to_pil(vis_im1, unnormalize=False).save(os.path.join(save_dir, f'warp_im1.jpg'))
+                        tensor_to_pil(vis_im2, unnormalize=False).save(os.path.join(save_dir, f'warp_im2.jpg'))
+
+                    if True: # Note: we keep this true as it was used in DKM/RoMa papers. There is very little difference compared to setting to False. 
+                        scale1 = 1200 / max(w1, h1)
+                        scale2 = 1200 / max(w2, h2)
+                        w1, h1 = scale1 * w1, scale1 * h1
+                        w2, h2 = scale2 * w2, scale2 * h2
+                        K1, K2 = K1.copy(), K2.copy()
+                        K1[:2] = K1[:2] * scale1
+                        K2[:2] = K2[:2] * scale2
+
+                    kpts1, kpts2 = to_pixel_coordinates(sparse_matches, h1, w1, h2, w2)
+                    kpts1, kpts2 = kpts1.cpu().numpy(), kpts2.cpu().numpy()
+                    for _ in range(5):
+                        shuffling = np.random.permutation(np.arange(len(kpts1)))
+                        kpts1 = kpts1[shuffling]
+                        kpts2 = kpts2[shuffling]
+                        try:
+                            threshold = 0.5 
+                            norm_threshold = threshold / (np.mean(np.abs(K1[:2, :2])) + np.mean(np.abs(K2[:2, :2])))
+                            R_est, t_est, mask = estimate_pose(
+                                kpts1,
+                                kpts2,
+                                K1,
+                                K2,
+                                norm_threshold,
+                                conf=0.99999,
+                            )
+                            T1_to_2_est = np.concatenate((R_est, t_est), axis=-1)  #
+                            e_t, e_R = compute_pose_error(T1_to_2_est, R, t)
+                            e_pose = max(e_t, e_R)
+                        except Exception as e:
+                            print(repr(e))
+                            e_t, e_R = 90, 90
+                            e_pose = max(e_t, e_R)
+                        tot_e_t.append(e_t)
+                        tot_e_R.append(e_R)
+                        tot_e_pose.append(e_pose)
+                    # pdb.set_trace()
+            tot_e_pose = np.array(tot_e_pose)
+            auc = pose_auc(tot_e_pose, thresholds)
+            acc_5 = (tot_e_pose < 5).mean()
+            acc_10 = (tot_e_pose < 10).mean()
+            acc_15 = (tot_e_pose < 15).mean()
+            acc_20 = (tot_e_pose < 20).mean()
+            map_5 = acc_5
+            map_10 = np.mean([acc_5, acc_10])
+            map_20 = np.mean([acc_5, acc_10, acc_15, acc_20])
+            print(f"{model_name} auc: {auc}")
+            return {
+                "auc_5": auc[0],
+                "auc_10": auc[1],
+                "auc_20": auc[2],
+                "map_5": map_5,
+                "map_10": map_10,
+                "map_20": map_20,
+            }
+        
+class ScanNetBenchmark:
+    def __init__(self, data_root="data/scannet") -> None:
+        self.data_root = data_root
+
+    def benchmark(self, model, device='cuda', model_name = 'spider', debug=False):
         model.train(False)
         with torch.no_grad():
-            gd_tot = 0.0
-            pck_1_tot = 0.0
-            pck_3_tot = 0.0
-            pck_5_tot = 0.0
-            gd1_tot, pck1_1_tot, pck1_3_tot, pck1_5_tot = 0.0, 0.0, 0.0, 0.0
-            gd2_tot, pck2_1_tot, pck2_3_tot, pck2_5_tot = 0.0, 0.0, 0.0, 0.0
-            sampler = torch.utils.data.WeightedRandomSampler(
-                torch.ones(len(self.dataset)), replacement=False, num_samples=self.num_samples
+            data_root = self.data_root
+            tmp = np.load(osp.join(data_root, "test.npz"))
+            pairs, rel_pose = tmp["name"], tmp["rel_pose"]
+            tot_e_t, tot_e_R, tot_e_pose = [], [], []
+            pair_inds = np.random.choice(
+                range(len(pairs)), size=len(pairs), replace=False
             )
-            B = batch_size
-            dataloader = torch.utils.data.DataLoader(
-                self.dataset, batch_size=B, num_workers=batch_size, sampler=sampler
-            )
-            for idx, data in tqdm.tqdm(enumerate(dataloader), disable = romatch.RANK > 0):
-                im_A, im_B, depth1, depth2, T_1to2, K1, K2, T1, T2 = (
-                    data["im_A"].cuda(),
-                    data["im_B"].cuda(),
-                    data["im_A_depth"].cuda(),
-                    data["im_B_depth"].cuda(),
-                    data["T_1to2"].cuda(),
-                    data["K1"].cuda(),
-                    data["K2"].cuda(),
-                    data["T1"].cuda(),
-                    data["T2"].cuda(),
-                )
-                matches, certainty, pts1, pts_conf1, pts2, pts_conf2 = model.match(im_A, im_B, batched=True)
-                gd, pck_1, pck_3, pck_5, prob = self.geometric_dist(
-                    depth1, depth2, T_1to2, K1, K2, matches
-                )
-                gd1, pck1_1, pck1_3, pck1_5, valid1, gd2, pck2_1, pck2_3, pck2_5, valid2 = self.depth_dist(depth1, depth2, K1, K2, T1, T2, pts1, pts_conf1, pts2, pts_conf2)
-                
-                if romatch.DEBUG_MODE:
-                    from romatch.utils.utils import tensor_to_pil
-                    import torch.nn.functional as F
-                    path = "vis"
-                    H, W = model.get_output_resolution()
-                    white_im = torch.ones((B,1,H,W),device="cuda")
-                    im_B_transfer_rgb = F.grid_sample(
-                        im_B.cuda(), matches[:,:,:W, 2:], mode="bilinear", align_corners=False
+            for pairind in tqdm(pair_inds, smoothing=0.9):
+                scene = pairs[pairind]
+                scene_name = f"scene0{scene[0]}_00"
+                im_A_path = osp.join(
+                        self.data_root,
+                        "scannet_test_1500",
+                        scene_name,
+                        "color",
+                        f"{scene[2]}.jpg",
                     )
-                    warp_im = im_B_transfer_rgb
-                    c_b = certainty[:,None]#(certainty*0.9 + 0.1*torch.ones_like(certainty))[:,None]
-                    vis_im = c_b * warp_im + (1 - c_b) * white_im
-                    for b in range(B):
-                        import os
-                        os.makedirs(f"{path}/{model.name}/{idx}_{b}_{H}_{W}",exist_ok=True)
-                        tensor_to_pil(vis_im[b], unnormalize=True).save(
-                            f"{path}/{model.name}/{idx}_{b}_{H}_{W}/warp.jpg")
-                        tensor_to_pil(im_A[b].cuda(), unnormalize=True).save(
-                            f"{path}/{model.name}/{idx}_{b}_{H}_{W}/im_A.jpg")
-                        tensor_to_pil(im_B[b].cuda(), unnormalize=True).save(
-                            f"{path}/{model.name}/{idx}_{b}_{H}_{W}/im_B.jpg")
+                im_B_path = osp.join(
+                        self.data_root,
+                        "scannet_test_1500",
+                        scene_name,
+                        "color",
+                        f"{scene[3]}.jpg",
+                    )
+                T_gt = rel_pose[pairind].reshape(3, 4)
+                R, t = T_gt[:3, :3], T_gt[:3, 3]
+                K = np.stack(
+                    [
+                        np.array([float(i) for i in r.split()])
+                        for r in open(
+                            osp.join(
+                                self.data_root,
+                                "scannet_test_1500",
+                                scene_name,
+                                "intrinsic",
+                                "intrinsic_color.txt",
+                            ),
+                            "r",
+                        )
+                        .read()
+                        .split("\n")
+                        if r
+                    ]
+                )
 
+                K1_ori = K.copy()
+                K2_ori = K.copy()
 
-                gd_tot, pck_1_tot, pck_3_tot, pck_5_tot = (
-                    gd_tot + gd.mean(),
-                    pck_1_tot + pck_1,
-                    pck_3_tot + pck_3,
-                    pck_5_tot + pck_5,
+                imgs, _ = load_images_with_intrinsics([im_A_path, im_B_path], size=512, intrinsics=None)
+                imgs_large, intrinsics = load_images_with_intrinsics([im_A_path, im_B_path], size=1344, intrinsics=[K1_ori, K2_ori])
+                # if np.all(imgs[0]['true_shape'] == imgs[1]['true_shape']):
+                #     continue
+                image_pairs = make_symmetric_pairs(imgs)
+                image_large_pairs = make_symmetric_pairs(imgs_large)
+                res = inference_upsample(image_pairs, image_large_pairs, model, device, batch_size=1, verbose=True)
+                
+                warp1, certainty1, warp2, certainty2 = match_symmetric_upsample(res['corresps'], res['low_corresps'])
+                sparse_matches, _ = sample_symmetric(warp1, certainty1, warp2, certainty2, num=5000)
+                if debug:
+                    from matplotlib import pyplot as pl
+                    save_dir = '/cis/home/zshao14/Downloads/spider/assets/scannet_benchmark'
+                    os.makedirs(save_dir, exist_ok=True)
+                    view1, view2 = res['view1'], res['view2']
+                    image_mean = torch.as_tensor([0.5, 0.5, 0.5], device='cpu').reshape(1, 3, 1, 1)
+                    image_std = torch.as_tensor([0.5, 0.5, 0.5], device='cpu').reshape(1, 3, 1, 1)
+
+                    viz_imgs = []
+                    for i, view in enumerate([view1, view2]):
+                        rgb_tensor = view['img'][0] * image_std + image_mean
+                        viz_imgs.append(rgb_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy())
+
+                    H0, W0, H1, W1 = *viz_imgs[0].shape[:2], *viz_imgs[1].shape[:2]
+                    kpts1, kpts2 = to_pixel_coordinates(sparse_matches, H0, W0, H1, W1)
+                    matches_im0, matches_im1 = kpts1.cpu().numpy(), kpts2.cpu().numpy()
+                    
+                    valid_matches_im0 = (matches_im0[:, 0] >= 3) & (matches_im0[:, 0] < int(W0) - 3) & (
+                        matches_im0[:, 1] >= 3) & (matches_im0[:, 1] < int(H0) - 3)
+
+                    valid_matches_im1 = (matches_im1[:, 0] >= 3) & (matches_im1[:, 0] < int(W1) - 3) & (
+                        matches_im1[:, 1] >= 3) & (matches_im1[:, 1] < int(H1) - 3)
+
+                    valid_matches = valid_matches_im0 & valid_matches_im1
+                    matches_im0, matches_im1 = matches_im0[valid_matches], matches_im1[valid_matches]
+
+                    num_matches = len(matches_im0)
+                    n_viz = 20
+                    match_idx_to_viz = np.round(np.linspace(0, num_matches - 1, n_viz)).astype(int)
+                    viz_matches_im0, viz_matches_im1 = matches_im0[match_idx_to_viz], matches_im1[match_idx_to_viz]
+                    img0 = np.pad(viz_imgs[0], ((0, max(H1 - H0, 0)), (0, 0), (0, 0)), 'constant', constant_values=0)
+                    img1 = np.pad(viz_imgs[1], ((0, max(H0 - H1, 0)), (0, 0), (0, 0)), 'constant', constant_values=0)
+                    img = np.concatenate((img0, img1), axis=1)
+                    pl.figure()
+                    pl.imshow(img)
+                    pl.axis('off')  
+                    pl.savefig(os.path.join(save_dir, 'raw.png'), dpi=300, bbox_inches='tight')
+                    pl.close()
+
+                    pl.figure()
+                    pl.imshow(img)
+                    cmap = pl.get_cmap('jet')
+                    for i in range(n_viz):
+                        (x0, y0), (x1, y1) = viz_matches_im0[i].T, viz_matches_im1[i].T
+                        pl.plot([x0, x1 + W0], [y0, y1], '-+', color=cmap(i / (n_viz - 1)), scalex=False, scaley=False)
+                    # pl.show(block=True)
+                    pl.savefig(os.path.join(save_dir, 'matches.png'), dpi=300, bbox_inches='tight')
+                    pl.close()
+                    im2_transfer_rgb = F.grid_sample(
+                        view2['img'][0][None], warp1[:,:, 2:][None], mode="bilinear", align_corners=False
+                        )[0] ###H1, W1
+                    im1_transfer_rgb = F.grid_sample(
+                        view1['img'][0][None], warp2[:, :, :2][None], mode="bilinear", align_corners=False
+                        )[0] ###H2, W2
+                    white_im1 = torch.ones((H0,W0))
+                    white_im2 = torch.ones((H1,W1))
+                    vis_im1 = certainty1 * im2_transfer_rgb + (1 - certainty1) * white_im1
+                    vis_im2 = certainty2 * im1_transfer_rgb + (1 - certainty2) * white_im2
+                    tensor_to_pil(vis_im1, unnormalize=False).save(os.path.join(save_dir, f'warp_im1.jpg'))
+                    tensor_to_pil(vis_im2, unnormalize=False).save(os.path.join(save_dir, f'warp_im2.jpg'))
+
+                K1, K2 = intrinsics
+                h1, w1 = imgs_large[0]['true_shape'][0]
+                h2, w2 = imgs_large[1]['true_shape'][0]
+                scale1 = 480 / min(w1, h1)
+                scale2 = 480 / min(w2, h2)
+                w1, h1 = scale1 * w1, scale1 * h1
+                w2, h2 = scale2 * w2, scale2 * h2
+                K1 = K1 * scale1
+                K2 = K2 * scale2
+
+                # kpts1, kpts2 = to_pixel_coordinates(sparse_matches, h1, w1, h2, w2)
+                              
+
+                offset = 0.5
+                kpts1 = sparse_matches[:, :2]
+                kpts1 = kpts1.cpu().numpy()
+                kpts1 = (
+                    np.stack(
+                        (
+                            w1 * (kpts1[:, 0] + 1) / 2 - offset,
+                            h1 * (kpts1[:, 1] + 1) / 2 - offset,
+                        ),
+                        axis=-1,
+                    )
                 )
-                gd1_tot, pck1_1_tot, pck1_3_tot, pck1_5_tot = (
-                    gd1_tot + gd1.mean(),
-                    pck1_1_tot + pck1_1,
-                    pck1_3_tot + pck1_3,
-                    pck1_5_tot + pck1_5,
+                kpts2 = sparse_matches[:, 2:]
+                kpts2 = kpts2.cpu().numpy()
+                kpts2 = (
+                    np.stack(
+                        (
+                            w2 * (kpts2[:, 0] + 1) / 2 - offset,
+                            h2 * (kpts2[:, 1] + 1) / 2 - offset,
+                        ),
+                        axis=-1,
+                    )
                 )
-                gd2_tot, pck2_1_tot, pck2_3_tot, pck2_5_tot = (
-                    gd2_tot + gd2.mean(),
-                    pck2_1_tot + pck2_1,
-                    pck2_3_tot + pck2_3,
-                    pck2_5_tot + pck2_5,
+                for _ in range(5):
+                    shuffling = np.random.permutation(np.arange(len(kpts1)))
+                    kpts1 = kpts1[shuffling]
+                    kpts2 = kpts2[shuffling]
+                    try:
+                        norm_threshold = 0.5 / (
+                        np.mean(np.abs(K1[:2, :2])) + np.mean(np.abs(K2[:2, :2])))
+                        R_est, t_est, mask = estimate_pose(
+                            kpts1,
+                            kpts2,
+                            K1,
+                            K2,
+                            norm_threshold,
+                            conf=0.99999,
+                        )
+                        T1_to_2_est = np.concatenate((R_est, t_est), axis=-1)  #
+                        e_t, e_R = compute_pose_error(T1_to_2_est, R, t)
+                        e_pose = max(e_t, e_R)
+                    except Exception as e:
+                        print(repr(e))
+                        e_t, e_R = 90, 90
+                        e_pose = max(e_t, e_R)
+                    tot_e_t.append(e_t)
+                    tot_e_R.append(e_R)
+                    tot_e_pose.append(e_pose)
+                tot_e_t.append(e_t)
+                tot_e_R.append(e_R)
+                tot_e_pose.append(e_pose)
+                # pdb.set_trace()
+            tot_e_pose = np.array(tot_e_pose)
+            thresholds = [5, 10, 20]
+            auc = pose_auc(tot_e_pose, thresholds)
+            acc_5 = (tot_e_pose < 5).mean()
+            acc_10 = (tot_e_pose < 10).mean()
+            acc_15 = (tot_e_pose < 15).mean()
+            acc_20 = (tot_e_pose < 20).mean()
+            map_5 = acc_5
+            map_10 = np.mean([acc_5, acc_10])
+            map_20 = np.mean([acc_5, acc_10, acc_15, acc_20])
+            return {
+                "auc_5": auc[0],
+                "auc_10": auc[1],
+                "auc_20": auc[2],
+                "map_5": map_5,
+                "map_10": map_10,
+                "map_20": map_20,
+            }
+        
+class HpatchesHomogBenchmark:
+    """Hpatches grid goes from [0,n-1] instead of [0.5,n-0.5]"""
+
+    def __init__(self, dataset_path, seqs_dir = "hpatches-sequences-release") -> None:
+        # seqs_dir = "hpatches-sequences-release"
+        self.seqs_path = os.path.join(dataset_path, seqs_dir)
+        self.seq_names = sorted(os.listdir(self.seqs_path))
+        # Ignore seqs is same as LoFTR.
+        self.ignore_seqs = set(
+            [
+                "i_contruction",
+                "i_crownnight",
+                "i_dc",
+                "i_pencils",
+                "i_whitebuilding",
+                "v_artisans",
+                "v_astronautis",
+                "v_talent",
+            ]
+        )
+
+    def convert_coordinates(self, im_A_coords, im_A_to_im_B, wq, hq, wsup, hsup):
+        offset = 0.5  # Hpatches assumes that the center of the top-left pixel is at [0,0] (I think)
+        im_A_coords = (
+            np.stack(
+                (
+                    wq * (im_A_coords[..., 0] + 1) / 2,
+                    hq * (im_A_coords[..., 1] + 1) / 2,
+                ),
+                axis=-1,
+            )
+            - offset
+        )
+        im_A_to_im_B = (
+            np.stack(
+                (
+                    wsup * (im_A_to_im_B[..., 0] + 1) / 2,
+                    hsup * (im_A_to_im_B[..., 1] + 1) / 2,
+                ),
+                axis=-1,
+            )
+            - offset
+        )
+        return im_A_coords, im_A_to_im_B
+
+    def benchmark(self, model, device='cuda', model_name = 'spider', debug=False):
+        homog_dists = []
+        for seq_idx, seq_name in tqdm(
+            enumerate(self.seq_names), total=len(self.seq_names)
+        ):
+            im_A_path = os.path.join(self.seqs_path, seq_name, "1.ppm")
+            im_A = Image.open(im_A_path)
+            w1, h1 = im_A.size
+            for im_idx in range(2, 7):
+                im_B_path = os.path.join(self.seqs_path, seq_name, f"{im_idx}.ppm")
+                H = np.loadtxt(
+                    os.path.join(self.seqs_path, seq_name, "H_1_" + str(im_idx))
                 )
+                
+                imgs, _ = load_two_images_with_H(im_A_path, im_B_path, size=512, H_ori=None)
+                imgs_large, H_new = load_two_images_with_H(im_A_path, im_B_path, size=1344, H_ori=H)
+                image_pairs = make_symmetric_pairs(imgs)
+                image_large_pairs = make_symmetric_pairs(imgs_large)
+                res = inference_upsample(image_pairs, image_large_pairs, model, device, batch_size=1, verbose=True)
+                
+                warp1, certainty1, warp2, certainty2 = match_symmetric_upsample(res['corresps'], res['low_corresps'])
+                good_matches, _ = sample_symmetric(warp1, certainty1, warp2, certainty2, num=5000)
+            
+                h1, w1 = imgs_large[0]['true_shape'][0]
+                h2, w2 = imgs_large[1]['true_shape'][0]
+                pos_a, pos_b = self.convert_coordinates(
+                    good_matches[:, :2], good_matches[:, 2:], w1, h1, w2, h2
+                )
+                if debug:
+                    from matplotlib import pyplot as pl
+                    save_dir = '/cis/home/zshao14/Downloads/spider/assets/hpatches_benchmark'
+                    os.makedirs(save_dir, exist_ok=True)
+                    view1, view2 = res['view1'], res['view2']
+                    image_mean = torch.as_tensor([0.5, 0.5, 0.5], device='cpu').reshape(1, 3, 1, 1)
+                    image_std = torch.as_tensor([0.5, 0.5, 0.5], device='cpu').reshape(1, 3, 1, 1)
+
+                    viz_imgs = []
+                    for i, view in enumerate([view1, view2]):
+                        rgb_tensor = view['img'][0] * image_std + image_mean
+                        viz_imgs.append(rgb_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy())
+
+                    H0, W0, H1, W1 = *viz_imgs[0].shape[:2], *viz_imgs[1].shape[:2]
+                    matches_im0, matches_im1 = pos_a, pos_b
+                    
+                    valid_matches_im0 = (matches_im0[:, 0] >= 3) & (matches_im0[:, 0] < int(W0) - 3) & (
+                        matches_im0[:, 1] >= 3) & (matches_im0[:, 1] < int(H0) - 3)
+
+                    valid_matches_im1 = (matches_im1[:, 0] >= 3) & (matches_im1[:, 0] < int(W1) - 3) & (
+                        matches_im1[:, 1] >= 3) & (matches_im1[:, 1] < int(H1) - 3)
+
+                    valid_matches = valid_matches_im0 & valid_matches_im1
+                    matches_im0, matches_im1 = matches_im0[valid_matches], matches_im1[valid_matches]
+
+                    num_matches = len(matches_im0)
+                    n_viz = 100
+                    match_idx_to_viz = np.round(np.linspace(0, num_matches - 1, n_viz)).astype(int)
+                    viz_matches_im0, viz_matches_im1 = matches_im0[match_idx_to_viz], matches_im1[match_idx_to_viz]
+                    img0 = np.pad(viz_imgs[0], ((0, max(H1 - H0, 0)), (0, 0), (0, 0)), 'constant', constant_values=0)
+                    img1 = np.pad(viz_imgs[1], ((0, max(H0 - H1, 0)), (0, 0), (0, 0)), 'constant', constant_values=0)
+                    img = np.concatenate((img0, img1), axis=1)
+                    
+                    pl.figure()
+                    pl.imshow(img)
+                    pl.axis('off')  
+                    pl.savefig(os.path.join(save_dir, 'raw.png'), dpi=300, bbox_inches='tight')
+                    pl.close()
+
+                    pl.figure()
+                    pl.imshow(img)
+                    cmap = pl.get_cmap('jet')
+                    for i in range(n_viz):
+                        (x0, y0), (x1, y1) = viz_matches_im0[i].T, viz_matches_im1[i].T
+                        pl.plot([x0, x1 + W0], [y0, y1], '-+', color=cmap(i / (n_viz - 1)), scalex=False, scaley=False)
+                    # pl.show(block=True)
+                    pl.savefig(os.path.join(save_dir, 'matches.png'), dpi=300, bbox_inches='tight')
+                    pl.close()
+                    im2_transfer_rgb = F.grid_sample(
+                        view2['img'][0][None], warp1[:,:, 2:][None], mode="bilinear", align_corners=False
+                        )[0] ###H1, W1
+                    im1_transfer_rgb = F.grid_sample(
+                        view1['img'][0][None], warp2[:, :, :2][None], mode="bilinear", align_corners=False
+                        )[0] ###H2, W2
+                    white_im1 = torch.ones((H0,W0))
+                    white_im2 = torch.ones((H1,W1))
+                    vis_im1 = certainty1 * im2_transfer_rgb + (1 - certainty1) * white_im1
+                    vis_im2 = certainty2 * im1_transfer_rgb + (1 - certainty2) * white_im2
+                    tensor_to_pil(vis_im1, unnormalize=False).save(os.path.join(save_dir, f'warp_im1.jpg'))
+                    tensor_to_pil(vis_im2, unnormalize=False).save(os.path.join(save_dir, f'warp_im2.jpg'))
+
+                try:
+                    H_pred, inliers = cv2.findHomography(
+                        pos_a,
+                        pos_b,
+                        method = cv2.RANSAC,
+                        confidence = 0.99999,
+                        ransacReprojThreshold = 3 * min(w2, h2) / 480,
+                    )
+                except:
+                    H_pred = None
+                if H_pred is None:
+                    H_pred = np.zeros((3, 3))
+                    H_pred[2, 2] = 1.0
+                corners = np.array(
+                    [[0, 0, 1], [0, h1 - 1, 1], [w1 - 1, 0, 1], [w1 - 1, h1 - 1, 1]]
+                )
+                real_warped_corners = np.dot(corners, np.transpose(H_new))
+                real_warped_corners = (
+                    real_warped_corners[:, :2] / real_warped_corners[:, 2:]
+                )
+                warped_corners = np.dot(corners, np.transpose(H_pred))
+                warped_corners = warped_corners[:, :2] / warped_corners[:, 2:]
+                mean_dist = np.mean(
+                    np.linalg.norm(real_warped_corners - warped_corners, axis=1)
+                ) / (min(w2, h2) / 480.0)
+                homog_dists.append(mean_dist)
+                # pdb.set_trace()
+
+        thresholds = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        auc = pose_auc(np.array(homog_dists), thresholds)
         return {
-            "epe": gd_tot.item() / len(dataloader),
-            "mega_pck_1": pck_1_tot.item() / len(dataloader),
-            "mega_pck_3": pck_3_tot.item() / len(dataloader),
-            "mega_pck_5": pck_5_tot.item() / len(dataloader),
-            "pts1_epe": gd1_tot.item() / len(dataloader),
-            "pts1_pck_1": pck1_1_tot.item() / len(dataloader),
-            "pts1_pck_3": pck1_3_tot.item() / len(dataloader),
-            "pts1_pck_5": pck1_5_tot.item() / len(dataloader),
-            "pts2_epe": gd2_tot.item() / len(dataloader),
-            "pts2_pck_1": pck2_1_tot.item() / len(dataloader),
-            "pts2_pck_3": pck2_3_tot.item() / len(dataloader),
-            "pts2_pck_5": pck2_5_tot.item() / len(dataloader),
+            "hpatches_homog_auc_3": auc[2],
+            "hpatches_homog_auc_5": auc[4],
+            "hpatches_homog_auc_10": auc[9],
         }

@@ -11,7 +11,7 @@ from torch import nn
 from einops import rearrange
 
 # noinspection PyPackages
-from .dino import vit_large, Block, MemEffAttention
+from spider.dino import vit_large, Block, MemEffAttention
 import pdb
 
 warnings.filterwarnings(

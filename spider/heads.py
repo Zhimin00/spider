@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .roma import TransformerDecoder, Block, MemEffAttention, ConvRefiner, Decoder, CosKernel, GP
+from spider.roma import TransformerDecoder, Block, MemEffAttention, ConvRefiner, Decoder, CosKernel, GP
 from einops import rearrange
 import pdb
 
@@ -15,7 +15,7 @@ class WarpHead(nn.Module):
         self.decoder = decoder
         self.patch_size = patch_size
 
-    def forward(self, cnn_feats1, cnn_feats2, true_shape1, true_shape2, upsample = False, scale_factor = 1, corresps=None):
+    def forward(self, cnn_feats1, cnn_feats2, true_shape1, true_shape2, upsample = False, scale_factor = 1, finest_corresps=None):
         feat1_pyramid = {}
         H1, W1 = true_shape1[-2:]
         N_Hs1 = [H1 // 1, H1 // 2, H1 // 4, H1 // 8, H1 // self.patch_size]
@@ -37,7 +37,7 @@ class WarpHead(nn.Module):
         corresps = self.decoder(feat1_pyramid, 
                                 feat2_pyramid, 
                                 upsample = upsample, 
-                                **(corresps if corresps else {}),
+                                **(finest_corresps if finest_corresps else {}),
                                 scale_factor=scale_factor)
         return corresps
 

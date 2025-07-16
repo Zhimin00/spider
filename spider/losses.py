@@ -150,7 +150,7 @@ def opencv_to_colmap_intrinsics(K):
     return K
 
 class PCK(nn.Module):
-    def __init__(self, attenuate_cert=True):
+    def __init__(self, attenuate_cert=False):
         super().__init__()
         self.attenuate_cert = attenuate_cert
     

@@ -15,7 +15,6 @@ from dust3r.patch_embed import get_patch_embed
 from dust3r.heads import head_factory as dust3r_head_factory
 # from dust3r.model import CroCoNet
 import dust3r.utils.path_to_croco  # noqa: F401
-
 from models.croco import CroCoNet  # noqa
 from models.blocks import Mlp
 
@@ -85,6 +84,7 @@ class SPIDER (CroCoNet):
         self.cnn = VGG19_all(pretrained=vgg_pretrained)
         self.cnn_feature_dims = [64, 128, 256, 512]
         self.set_freeze(freeze)
+        self.landscape_only = landscape_only
         
 
     @classmethod
@@ -137,21 +137,24 @@ class SPIDER (CroCoNet):
 
     def cnn_embed(self, img, true_shape):
         B, C, H, W = img.shape
-        assert W >= H, f'img should be in landscape mode, but got {W=} {H=}'
-        assert true_shape.shape == (B, 2), f"true_shape has the wrong shape={true_shape.shape}"
-
-        height, width = true_shape.T
-        is_landscape = (width >= height)
-        is_portrait = ~is_landscape
-        ns = [W * H, (W//2) * (H//2), (W//4) * (H//4), (W//8) * (H//8)]
-        # allocate result
-        feats = [img.new_zeros((B, ns[idx], self.cnn_feature_dims[idx])) for idx in range(len(self.cnn_feature_dims))]
-        feat1, feat2, feat4, feat8 = feats
-        
-        feat1[is_landscape], feat2[is_landscape], feat4[is_landscape], feat8[is_landscape] = self.cnn(img[is_landscape])
-        feat1[is_portrait], feat2[is_portrait], feat4[is_portrait], feat8[is_portrait] = self.cnn(img[is_portrait].swapaxes(-1, -2))
-        cnn_feats = [feat1, feat2, feat4, feat8]
-        return cnn_feats
+        if self.landscape_only:
+            assert W >= H, f'img should be in landscape mode, but got {W=} {H=}'
+            assert true_shape.shape == (B, 2), f"true_shape has the wrong shape={true_shape.shape}"
+            height, width = true_shape.T
+            is_landscape = (width >= height)
+            is_portrait = ~is_landscape
+            ns = [W * H, (W//2) * (H//2), (W//4) * (H//4), (W//8) * (H//8)]
+            # allocate result
+            feats = [img.new_zeros((B, ns[idx], self.cnn_feature_dims[idx])) for idx in range(len(self.cnn_feature_dims))]
+            feat1, feat2, feat4, feat8 = feats
+            
+            feat1[is_landscape], feat2[is_landscape], feat4[is_landscape], feat8[is_landscape] = self.cnn(img[is_landscape])
+            feat1[is_portrait], feat2[is_portrait], feat4[is_portrait], feat8[is_portrait] = self.cnn(img[is_portrait].swapaxes(-1, -2))
+            cnn_feats = [feat1, feat2, feat4, feat8]
+            return cnn_feats
+        else:
+            cnn_feats = self.cnn(img)
+            return cnn_feats
 
     def _encode_image(self, image, true_shape):
         # embed the image into patches  (x has size B x Npatches x C)
@@ -178,7 +181,7 @@ class SPIDER (CroCoNet):
             cnn_feats2 = list(cnn_feats2)
         else:
             out, pos, cnn_feats = self._encode_image(img1, true_shape1)
-            out2, pos2, cnn_feats = self._encode_image(img2, true_shape2)
+            out2, pos2, cnn_feats2 = self._encode_image(img2, true_shape2)
         return out, out2, pos, pos2, cnn_feats, cnn_feats2
 
     def _encode_symmetrized(self, view1, view2):
@@ -222,11 +225,11 @@ class SPIDER (CroCoNet):
         final_output[-1] = tuple(map(self.dec_norm, final_output[-1]))
         return zip(*final_output)
 
-    def _downstream_head(self, head_num, cnn_feats1, cnn_feats2, shape1, shape2):
+    def _downstream_head(self, head_num, cnn_feats1, cnn_feats2, shape1, shape2, upsample=False,finest_corresps=None):
         B, S, D = cnn_feats1[-1].shape
         # img_shape = tuple(map(int, img_shape))
         head = getattr(self, f'head{head_num}')
-        return head(cnn_feats1, cnn_feats2, shape1, shape2)
+        return head(cnn_feats1, cnn_feats2, shape1, shape2, upsample=upsample, finest_corresps=finest_corresps)
 
     def forward(self, view1, view2):
         # encode the two images --> B,S,D
@@ -245,6 +248,25 @@ class SPIDER (CroCoNet):
             warnings.filterwarnings("ignore", category=FutureWarning)
             with torch.cuda.amp.autocast(enabled=False):
                 corresps = self._downstream_head(1, cnn_feats1, cnn_feats2, shape1, shape2)
+        return corresps
+    
+    def match(self, view1, view2, finest_corresps=None):
+        # encode the two images --> B,S,D
+        (shape1, shape2), (feat1, feat2), (pos1, pos2), (cnn_feats1, cnn_feats2) = self._encode_symmetrized(view1, view2)
+
+        # combine all ref images into object-centric representation
+        dec1, dec2 = self._decoder(feat1, pos1, feat2, pos2)
+        enc_output1, dec_output1 = dec1[0], dec1[-1]
+        enc_output2, dec_output2 = dec2[0], dec2[-1]
+        feat16_1 = torch.cat([enc_output1, dec_output1], dim=-1)
+        feat16_2 = torch.cat([enc_output2, dec_output2], dim=-1)
+        cnn_feats1.append(feat16_1)
+        cnn_feats2.append(feat16_2)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning)
+            with torch.cuda.amp.autocast(enabled=False):
+                corresps = self._downstream_head(1, cnn_feats1, cnn_feats2, shape1, shape2, upsample=True, finest_corresps=finest_corresps)
         return corresps
     
 class SPIDER_POINTMAP (CroCoNet):
@@ -267,12 +289,18 @@ class SPIDER_POINTMAP (CroCoNet):
 
         
         self.dec_blocks2 = deepcopy(self.dec_blocks)
+        
         dec_dim, enc_dim = self.decoder_embed.weight.shape
+        self.cls_token1 = nn.Parameter(torch.zeros((dec_dim,)))
+        self.cls_token2 = nn.Parameter(torch.zeros((dec_dim,)))
         self.pose_embed = Mlp(12, 4*dec_dim, dec_dim)
-        self.pose_mlp = Mlp(dec_dim)
-        self.mlp = Mlp( in_features=dec_dim, hidden_features=int(dec_dim * 4))
-        self.norm = nn.LayerNorm(dec_dim)
+        self.attn1 = nn.MultiheadAttention(embed_dim=dec_dim, num_heads=8, batch_first=True)
+        self.norm1 = nn.LayerNorm(dec_dim)
+        self.norm_final1 = nn.LayerNorm(dec_dim)
 
+        self.attn2 = nn.MultiheadAttention(embed_dim=dec_dim, num_heads=8, batch_first=True)
+        self.norm2 = nn.LayerNorm(dec_dim)
+        self.norm_final2 = nn.LayerNorm(dec_dim)
 
         # dust3r specific initialization
         self.set_downstream_head(output_mode, head_type, landscape_only, depth_mode, conf_mode, **croco_kwargs)
@@ -376,7 +404,7 @@ class SPIDER_POINTMAP (CroCoNet):
 
         return (shape1, shape2), (feat1, feat2), (pos1, pos2)
 
-    def _decoder(self, f1, pos1, f2, pos2, relpose1 = None, relpose2 = None):
+    def _decoder(self, f1, pos1, f2, pos2):
         final_output = [(f1, f2)]  # before projection
 
         # project to decoder dim
@@ -387,17 +415,8 @@ class SPIDER_POINTMAP (CroCoNet):
         for blk1, blk2 in zip(self.dec_blocks, self.dec_blocks2):
             # img1 side
             f1, _ = blk1(*final_output[-1][::+1], pos1, pos2) #B, N, C
-            if relpose1 is not None:
-                x1 = torch.cat((self.pose_mlp1(relpose1), f1), dim = 1) #B, N+1, C
-                f1 = f1 + self.mlp(self.norm(x1))[:, 1:] #B, N, C
-
             # img2 side
             f2, _ = blk2(*final_output[-1][::-1], pos2, pos1)
-            if relpose2 is not None:
-                x2 = torch.cat((self.pose_mlp2(relpose2), f1), dim = 1)
-                f2 = f2 + self.mlp(self.norm(x2))[:, 1:]
-                # pdb.set_trace()
-
             # store the result
             final_output.append((f1, f2))
 
@@ -415,21 +434,34 @@ class SPIDER_POINTMAP (CroCoNet):
     def forward(self, view1, view2):
         # encode the two images --> B,S,D
         (shape1, shape2), (feat1, feat2), (pos1, pos2) = self._encode_symmetrized(view1, view2)
-
+        dec1, dec2 = self._decoder(feat1, pos1, feat2, pos2)
+        f1 = dec1[-1]
+        f2 = dec1[-1]
         # combine all ref images into object-centric representation
         relpose1 = view1.get('known_pose')
         relpose2 = view2.get('known_pose')
-        if relpose1 is not None:
+        if relpose1 is not None and relpose2 is not None:
             # pdb.set_trace()
-            pose_emb1 = self.pose_embed(relpose1[:, :3].flatten(1)).unsqueeze(1)
-        else:
-            pose_emb1 = None
-        if relpose2 is not None:
-            pose_emb2 = self.pose_embed(relpose2[:, :3].flatten(1)).unsqueeze(1)
-        else:
-            pose_emb2 = None
-        dec1, dec2 = self._decoder(feat1, pos1, feat2, pos2, relpose1 = pose_emb1, relpose2 = pose_emb2)
-        
+            # img1 side
+            cls1 = self.cls_token1[None, None].expand(len(f1),1,-1).clone() #C -> B, 1, C
+            pose_emb1 = cls1 + self.pose_embed(relpose1[:, :3].flatten(1)).unsqueeze(1) #B, 12 -> B, 1, C
+            x1 = torch.cat((pose_emb1, f1), dim = 1) #B, N+1, C
+            x1 = self.norm1(x1)
+            attn_out1, _ = self.attn1(x1, x1, x1)
+            x1 = self.norm_final1(x1 + attn_out1)
+            f1 = x1[:, 1:]
+            dec1 += (f1,)
+            # img2 side
+            cls2 = self.cls_token2[None, None].expand(len(f2),1,-1).clone() #C -> B, 1, C
+            pose_emb2 = cls2 + self.pose_embed(relpose2[:, :3].flatten(1)).unsqueeze(1) #B, 12 -> B, 1, C
+            x2 = torch.cat((pose_emb2, f2), dim = 1) #B, N+1, C
+            x2 = self.norm2(x2)
+            attn_out2, _ = self.attn2(x2, x2, x2)
+            x2 = self.norm_final2(x2 + attn_out2)
+            f2 = x2[:, 1:]
+            dec2 += (f2,)
+            # pdb.set_trace()
+            # print('adding relpose')
         with torch.cuda.amp.autocast(enabled=False):
             res1 = self._downstream_head(1, [tok.float() for tok in dec1], shape1)
             res2 = self._downstream_head(2, [tok.float() for tok in dec2], shape2)

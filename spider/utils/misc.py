@@ -42,16 +42,16 @@ def transpose_to_landscape_warp(head, activate=True):
         then transpose the result in landscape 
         and stack everything back together.
     """
-    def wrapper_no(cnn_feats1, cnn_feats2, true_shape1, true_shape2):
+    def wrapper_no(cnn_feats1, cnn_feats2, true_shape1, true_shape2, upsample = False, finest_corresps=None):
         B = len(true_shape1)
         assert true_shape1[0:1].allclose(true_shape1), 'true_shape1 must be all identical'
         assert true_shape2[0:1].allclose(true_shape2), 'true_shape2 must be all identical'
         H1, W1 = true_shape1[0].cpu().tolist()
         H2, W2 = true_shape2[0].cpu().tolist()
-        res = head(cnn_feats1, cnn_feats2, (H1, W1), (H2, W2))
+        res = head(cnn_feats1, cnn_feats2, (H1, W1), (H2, W2), upsample=upsample, finest_corresps=finest_corresps)
         return res
 
-    def wrapper_yes(cnn_feats1, cnn_feats2, true_shape1, true_shape2):
+    def wrapper_yes(cnn_feats1, cnn_feats2, true_shape1, true_shape2, upsample = False, finest_corresps=None):
         B = len(true_shape1)
         # by definition, the batch is in landscape mode so W >= H
         H, W = int(true_shape1.min()), int(true_shape1.max())
@@ -65,13 +65,13 @@ def transpose_to_landscape_warp(head, activate=True):
 
         # true_shape = true_shape.cpu()
         if is_land2land.all():
-            return head(cnn_feats1, cnn_feats2, (H, W), (H, W))
+            return head(cnn_feats1, cnn_feats2, (H, W), (H, W), upsample=upsample, finest_corresps=finest_corresps)
         if is_land2port.all():
-            return head(cnn_feats1, cnn_feats2, (H, W), (W, H))
+            return head(cnn_feats1, cnn_feats2, (H, W), (W, H), upsample=upsample, finest_corresps=finest_corresps)
         if is_port2land.all():
-            return transposed_corresps(head(cnn_feats1, cnn_feats2, (W, H), (H, W)))
+            return transposed_corresps(head(cnn_feats1, cnn_feats2, (W, H), (H, W), upsample=upsample, finest_corresps=finest_corresps))
         if is_port2port.all():
-            return transposed_corresps(head(cnn_feats1, cnn_feats2, (W, H), (W, H)))
+            return transposed_corresps(head(cnn_feats1, cnn_feats2, (W, H), (W, H), upsample=upsample, finest_corresps=finest_corresps))
 
         # batch is a mix of both portraint & landscape
         def cnnout1(ar): return [cnn_feat[ar] for cnn_feat in cnn_feats1]

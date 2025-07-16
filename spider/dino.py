@@ -14,7 +14,6 @@ from typing import Callable, Optional, Union, Sequence, Tuple
 
 try:
     from xformers.ops import memory_efficient_attention, unbind, SwiGLU
-
     XFORMERS_AVAILABLE = True
 except ImportError:
     memory_efficient_attention = None

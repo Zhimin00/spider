@@ -461,7 +461,7 @@ class SPIDER_POINTMAP (CroCoNet):
             f2 = x2[:, 1:]
             dec2 += (f2,)
             # pdb.set_trace()
-            # print('adding relpose')
+            print('adding relpose')
         with torch.cuda.amp.autocast(enabled=False):
             res1 = self._downstream_head(1, [tok.float() for tok in dec1], shape1)
             res2 = self._downstream_head(2, [tok.float() for tok in dec2], shape2)

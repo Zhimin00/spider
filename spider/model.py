@@ -496,8 +496,8 @@ class SPIDER_POINTMAP (CroCoNet):
         #     outputs_with_relpose.append((f1, f2))
         # return zip(*outputs_with_relpose)
 
-        self.gamma_list1, self.beta_list1 = self.pose_film1(relpose1)     # 13 x (B, c_k)
-        self.gamma_list2, self.beta_list2 = self.pose_film2(relpose2)
+        self.gamma_list1, self.beta_list1 = self.pose_film1(relpose1[:, :3].flatten(1))     # 13 x (B, c_k)
+        self.gamma_list2, self.beta_list2 = self.pose_film2(relpose2[:, :3].flatten(1))
         outputs_with_relpose = []
         for i, (f1, f2) in enumerate(decoder_output):            # feat: (B, N, c_k)
             g1 = gamma_list1[i].unsqueeze(1)              # (B,1,c_k)

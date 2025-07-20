@@ -16,7 +16,7 @@ from dust3r.heads import head_factory as dust3r_head_factory
 # from dust3r.model import CroCoNet
 import dust3r.utils.path_to_croco  # noqa: F401
 from models.croco import CroCoNet  # noqa
-from models.blocks import Mlp
+from models.blocks import Mlp, Block
 
 
 import os
@@ -269,6 +269,38 @@ class SPIDER (CroCoNet):
                 corresps = self._downstream_head(1, cnn_feats1, cnn_feats2, shape1, shape2, upsample=True, finest_corresps=finest_corresps)
         return corresps
     
+class RelPoseEmbedGenerator(nn.Module):
+    def __init__(self, embed_dim):
+        super().__init__()
+        self.fc = Mlp(12, 4*embed_dim, embed_dim)
+
+    def forward(self, relpose):
+        # relpose: [B, 6]
+        return self.fc(relpose) #[B, embed_dim]
+
+class PoseFiLM_var(nn.Module):
+    def __init__(self, pose_dim, hidden, channel_list):
+        super().__init__()
+        self.mlp = Mlp(12, 4*hidden, hidden)
+
+        self.gammas = nn.ModuleList()
+        self.betas  = nn.ModuleList()
+        for c in channel_list:
+            self.gammas.append(nn.Linear(hidden, c))
+            self.betas.append(nn.Linear(hidden, c))
+        
+        for g, b in zip(self.gammas, self.betas):
+            nn.init.zeros_(g.weight); nn.init.zeros_(g.bias)
+            nn.init.zeros_(b.weight); nn.init.zeros_(b.bias)
+
+    def forward(self, p):                     # p: (B, 12)
+        h = self.mlp(p)                      # (B, hidden)
+        gamma_list, beta_list = [], []
+        for g_layer, b_layer in zip(self.gammas, self.betas):
+            gamma_list.append(g_layer(h))    # (B, c_k)
+            beta_list.append(b_layer(h))     # (B, c_k)
+        return gamma_list, beta_list
+
 class SPIDER_POINTMAP (CroCoNet):
     """ Two siamese encoders, followed by two decoders.
     The goal is to output pointmaps for two images separately
@@ -289,18 +321,40 @@ class SPIDER_POINTMAP (CroCoNet):
 
         
         self.dec_blocks2 = deepcopy(self.dec_blocks)
+        print(self.enc_embed_dim)
+        print(self.dec_embed_dim)
         
-        dec_dim, enc_dim = self.decoder_embed.weight.shape
-        self.cls_token1 = nn.Parameter(torch.zeros((dec_dim,)))
-        self.cls_token2 = nn.Parameter(torch.zeros((dec_dim,)))
-        self.pose_embed = Mlp(12, 4*dec_dim, dec_dim)
-        self.attn1 = nn.MultiheadAttention(embed_dim=dec_dim, num_heads=8, batch_first=True)
-        self.norm1 = nn.LayerNorm(dec_dim)
-        self.norm_final1 = nn.LayerNorm(dec_dim)
+        channel_list = [self.enc_embed_dim] + [self.dec_embed_dim] * self.dec_depth      # e.g. [1024, 768, 768, ...]
+        # 13
+        self.pose_film1 = PoseFiLM_var(12, self.enc_embed_dim, channel_list)
+        self.pose_film2 = PoseFiLM_var(12, self.enc_embed_dim, channel_list)
 
-        self.attn2 = nn.MultiheadAttention(embed_dim=dec_dim, num_heads=8, batch_first=True)
-        self.norm2 = nn.LayerNorm(dec_dim)
-        self.norm_final2 = nn.LayerNorm(dec_dim)
+
+
+        ### add embed
+        # self.relpose_embed_generators = nn.ModuleList([RelPoseEmbedGenerator(embed_dim=self.enc_embed_dim)] +
+        #     [RelPoseEmbedGenerator(embed_dim=self.dec_embed_dim) for _ in range(self.dec_depth)])
+
+        
+        
+
+
+        # dec_dim, enc_dim = self.decoder_embed.weight.shape
+        # self.attn_enc_block = Block(enc_dim, 12, mlp_ratio=4, qkv_bias=True)
+        # dec_depth = len(self.dec_blocks)
+        # self.attn_dec_blocks = nn.ModuleList([
+        #     Block(dec_dim, 12, mlp_ratio=4, qkv_bias=True)
+        #     for i in range(dec_depth)])
+        
+        # self.pose_embed_enc = Mlp(12, 4*enc_dim, enc_dim)
+        # self.pose_embed_dec = Mlp(12, 4*dec_dim, dec_dim)
+        # self.attn1 = nn.MultiheadAttention(embed_dim=dec_dim, num_heads=8, batch_first=True)
+        # self.norm1 = nn.LayerNorm(dec_dim)
+        # self.norm_final1 = nn.LayerNorm(dec_dim)
+
+        # self.attn2 = nn.MultiheadAttention(embed_dim=dec_dim, num_heads=8, batch_first=True)
+        # self.norm2 = nn.LayerNorm(dec_dim)
+        # self.norm_final2 = nn.LayerNorm(dec_dim)
 
         # dust3r specific initialization
         self.set_downstream_head(output_mode, head_type, landscape_only, depth_mode, conf_mode, **croco_kwargs)
@@ -317,7 +371,7 @@ class SPIDER_POINTMAP (CroCoNet):
             except TypeError as e:
                 raise Exception(f'tried to load {pretrained_model_name_or_path} from huggingface, but failed')
             return model
-
+    
     def _set_patch_embed(self, img_size=224, patch_size=16, enc_embed_dim=768):
         self.patch_size = patch_size
         self.patch_embed = get_patch_embed(self.patch_embed_cls, img_size, patch_size, enc_embed_dim)
@@ -423,45 +477,81 @@ class SPIDER_POINTMAP (CroCoNet):
         # normalize last output
         del final_output[1]  # duplicate with final_output[0]
         final_output[-1] = tuple(map(self.dec_norm, final_output[-1]))
-        return zip(*final_output)
+        return final_output
 
     def _downstream_head(self, head_num, decout, img_shape):
         B, S, D = decout[-1].shape
         # img_shape = tuple(map(int, img_shape))
         head = getattr(self, f'head{head_num}')
         return head(decout, img_shape)
-    
+
+    def _decoder_with_relpose(self, decoder_output, relpose1, relpose2):
+        # relpose_embeds1 = [generator(relpose1[:, :3].flatten(1)).unsqueeze(1) for generator in self.relpose_embed_generators]
+        # relpose_embeds2 = [generator(relpose2[:, :3].flatten(1)).unsqueeze(1) for generator in self.relpose_embed_generators]
+
+        # outputs_with_relpose = []
+        # for i, (f1, f2) in enumerate(decoder_output):
+        #     f1 = f1 + relpose_embeds1[i]
+        #     f2 = f2 + relpose_embeds2[i]
+        #     outputs_with_relpose.append((f1, f2))
+        # return zip(*outputs_with_relpose)
+
+        self.gamma_list1, self.beta_list1 = self.pose_film1(relpose1)     # 13 x (B, c_k)
+        self.gamma_list2, self.beta_list2 = self.pose_film2(relpose2)
+        outputs_with_relpose = []
+        for i, (f1, f2) in enumerate(decoder_output):            # feat: (B, N, c_k)
+            g1 = gamma_list1[i].unsqueeze(1)              # (B,1,c_k)
+            b1 = beta_list1[i].unsqueeze(1)
+            g2 = gamma_list2[i].unsqueeze(1)              # (B,1,c_k)
+            b2 = beta_list2[i].unsqueeze(1)
+            f1 = f1 * (1 + g1) + bl
+            f2 = f2 * (1 + g2) + b2
+            outputs_with_relpose.append((f1, f2))
+        return zip (*outputs_with_relpose)
+
     def forward(self, view1, view2):
         # encode the two images --> B,S,D
         (shape1, shape2), (feat1, feat2), (pos1, pos2) = self._encode_symmetrized(view1, view2)
-        dec1, dec2 = self._decoder(feat1, pos1, feat2, pos2)
-        f1 = dec1[-1]
-        f2 = dec1[-1]
-        # combine all ref images into object-centric representation
+        
         relpose1 = view1.get('known_pose')
         relpose2 = view2.get('known_pose')
         if relpose1 is not None and relpose2 is not None:
-            # pdb.set_trace()
-            # img1 side
-            cls1 = self.cls_token1[None, None].expand(len(f1),1,-1).clone() #C -> B, 1, C
-            pose_emb1 = cls1 + self.pose_embed(relpose1[:, :3].flatten(1)).unsqueeze(1) #B, 12 -> B, 1, C
-            x1 = torch.cat((pose_emb1, f1), dim = 1) #B, N+1, C
-            x1 = self.norm1(x1)
-            attn_out1, _ = self.attn1(x1, x1, x1)
-            x1 = self.norm_final1(x1 + attn_out1)
-            f1 = x1[:, 1:]
-            dec1 += (f1,)
-            # img2 side
-            cls2 = self.cls_token2[None, None].expand(len(f2),1,-1).clone() #C -> B, 1, C
-            pose_emb2 = cls2 + self.pose_embed(relpose2[:, :3].flatten(1)).unsqueeze(1) #B, 12 -> B, 1, C
-            x2 = torch.cat((pose_emb2, f2), dim = 1) #B, N+1, C
-            x2 = self.norm2(x2)
-            attn_out2, _ = self.attn2(x2, x2, x2)
-            x2 = self.norm_final2(x2 + attn_out2)
-            f2 = x2[:, 1:]
-            dec2 += (f2,)
-            # pdb.set_trace()
+            decoder_output = self._decoder(feat1, pos1, feat2, pos2)
+            dec1, dec2 = self._decoder_with_relpose(decoder_output, relpose1, relpose2)
             print('adding relpose')
+            
+
+        else:
+            final_output = self._decoder(feat1, pos1, feat2, pos2)
+            dec1, dec2 = zip(*final_output)
+
+        # f1 = dec1[-1]
+        # f2 = dec1[-1]
+        # # combine all ref images into object-centric representation
+        # relpose1 = view1.get('known_pose')
+        # relpose2 = view2.get('known_pose')
+        # if relpose1 is not None and relpose2 is not None:
+        #     # pdb.set_trace()
+        #     # img1 side
+        #     cls1 = self.cls_token1[None, None].expand(len(f1),1,-1).clone() #C -> B, 1, C
+        #     pose_emb1 = cls1 + self.pose_embed(relpose1[:, :3].flatten(1)).unsqueeze(1) #B, 12 -> B, 1, C
+        #     x1 = torch.cat((pose_emb1, f1), dim = 1) #B, N+1, C
+        #     x1 = self.norm1(x1)
+        #     attn_out1, _ = self.attn1(x1, x1, x1)
+        #     x1 = self.norm_final1(x1 + attn_out1)
+        #     f1 = x1[:, 1:]
+        #     dec1 += (f1,)
+        #     # img2 side
+        #     cls2 = self.cls_token2[None, None].expand(len(f2),1,-1).clone() #C -> B, 1, C
+        #     pose_emb2 = cls2 + self.pose_embed(relpose2[:, :3].flatten(1)).unsqueeze(1) #B, 12 -> B, 1, C
+        #     x2 = torch.cat((pose_emb2, f2), dim = 1) #B, N+1, C
+        #     x2 = self.norm2(x2)
+        #     attn_out2, _ = self.attn2(x2, x2, x2)
+        #     x2 = self.norm_final2(x2 + attn_out2)
+        #     f2 = x2[:, 1:]
+        #     dec2 += (f2,)
+        #     # pdb.set_trace()
+        #     print('adding relpose')
         with torch.cuda.amp.autocast(enabled=False):
             res1 = self._downstream_head(1, [tok.float() for tok in dec1], shape1)
             res2 = self._downstream_head(2, [tok.float() for tok in dec2], shape2)

@@ -499,11 +499,11 @@ if __name__ == '__main__':
 
     
     
-    model = SPIDER_POINTMAP.from_pretrained("/cis/home/zshao14/checkpoints/spider_pointmap/checkpoint-best.pth").to('cuda')
+    model = SPIDER_POINTMAP.from_pretrained("/cis/home/zshao14/checkpoints/aerialdust3r_relpose_dpt512_0716/checkpoint-best.pth").to('cuda')
     # model = Spider.from_pretrained("/cis/home/zshao14/checkpoints/spider_aerialdust3r_relpose/checkpoint-best.pth").to('cuda')
     
     per_building_results = {}
-    outdir_path = '/cis/net/io96/data/zshao/JHU-results/spider_dust3r_linear512_allrelpose_ga_gt'
+    outdir_path = '/cis/net/io96/data/zshao/JHU-results/spider_dust3r_dpt512_ga_gt'
     os.makedirs(outdir_path, exist_ok=True)
 
     for dir_name in sorted(os.listdir(datasets_path)):

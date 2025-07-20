@@ -79,18 +79,18 @@ See [LICENSE](LICENSE) for more information.
 
 ### Installation
 
-1. Clone MASt3R.
+1. Clone SPIDER.
 ```bash
-git clone --recursive https://github.com/naver/mast3r
-cd mast3r
+git clone --recursive https://github.com/Zhimin00/spider.git
+cd spider
 # if you have already cloned mast3r:
 # git submodule update --init --recursive
 ```
 
 2. Create the environment, here we show an example using conda.
 ```bash
-conda create -n mast3r python=3.11 cmake=3.14.0
-conda activate mast3r 
+conda create -n spider python=3.11 cmake=3.14.0
+conda activate spider
 conda install pytorch torchvision pytorch-cuda=12.1 -c pytorch -c nvidia  # use the correct version of cuda for your system
 pip install -r requirements.txt
 pip install -r dust3r/requirements.txt

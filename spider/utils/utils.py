@@ -92,14 +92,22 @@ def tensor_to_pil(x, unnormalize=False):
     return numpy_to_pil(x)
 
 
-def match_single(im_A_to_im_B, certainty, certainty_s16, attenuate_cert=True, inverse=False):
+def match_single(im_A_to_im_B, certainty, certainty_s16, attenuate_cert=True, inverse=False, batched=False):
     """
-    im_A_to_im_B: 1, 2, h, w
-    certainty: 1, 1, h, w
-    certainty_s16: 1, 1, h//16, w//16
+    not batched:
+        im_A_to_im_B:   2, h, w
+        certainty:      1, h, w
+        certainty_s16:  1, h//16, w//16
+    batched:
+        im_A_to_im_B:   B, 2, h, w
+        certainty:      B, 1, h, w
+        certainty_s16:  B, 1, h//16, w//16
     """
-    im_A_to_im_B, certainty, certainty_s16 = im_A_to_im_B[None], certainty[None], certainty_s16[None]
+    if not batched:
+        im_A_to_im_B, certainty, certainty_s16 = im_A_to_im_B[None], certainty[None], certainty_s16[None]
     b, _, h, w = certainty.shape
+    if not batched:
+        assert b == 1
     low_res_certainty = F.interpolate(
                 certainty_s16, size=(h, w), align_corners=False, mode="bilinear"
             )
@@ -129,10 +137,17 @@ def match_single(im_A_to_im_B, certainty, certainty_s16, attenuate_cert=True, in
         warp = torch.cat((im_A_to_im_B, im_A_coords), dim=-1)
     else:
         warp = torch.cat((im_A_coords, im_A_to_im_B), dim=-1)
+    if batched:
+        return (
+            warp, ### b, h, w, 4
+            certainty[:,0] ### b, h, w
+        )
     return (
             warp[0], ### h, w, 4
             certainty[0, 0] ### h, w
         )
+   
+
 def match_symmetric(corresps, attenuate_cert=True):
     finest_scale = 1
     im_A_to_im_Bs = corresps[finest_scale]["flow"] 
@@ -213,6 +228,17 @@ def sample(matches, certainty, num=10000, sample_mode = "threshold_balanced", sa
                         num_samples = min(num,len(good_certainty)), 
                         replacement=False)
     return good_matches[balanced_samples], good_certainty[balanced_samples]
+
+def sample_batched(matches, certainty, num=10000, sample_mode="threshold_balanced", sample_thresh=0.05):
+    B, N, _ = matches.shape
+    batched_matches = []
+    batched_certainty = []
+    for b in range(B):
+        good_matches_b, good_certainty_b = sample(matches[b], certainty[b], num=num, sample_mode=sample_mode, sample_thresh=sample_thresh)
+        batched_matches.append(good_matches_b)
+        batched_certainty.append(good_certainty_b)
+    # Stack the results to return tensors of shape [B, num, 4] and [B, num]
+    return torch.stack(batched_matches), torch.stack(batched_certainty)
 
 
 
@@ -365,6 +391,16 @@ def compute_pose_error(T_0to1, R, t):
     error_t = angle_error_vec(t.squeeze(), t_gt)
     error_t = np.minimum(error_t, 180 - error_t)  # ambiguity of E estimation
     error_R = angle_error_mat(R, R_gt)
+    return error_t, error_R
+
+def compute_pose_error_T(T1, T2, R, t):
+    R1 = T1[:3, :3]
+    t1 = T1[:3, 3]
+    R2, t2 = T2[:3, :3], T2[:3, 3]
+    R_est, t_est = compute_relative_pose(R1, t1, R2, t2)
+    error_t = angle_error_vec(t_est.squeeze(), t)
+    error_t = np.minimum(error_t, 180 - error_t)  # ambiguity of E estimation
+    error_R = angle_error_mat(R_est, R)
     return error_t, error_R
 
 def pose_auc(errors, thresholds):

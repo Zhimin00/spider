@@ -16,14 +16,14 @@ from dust3r.heads import head_factory as dust3r_head_factory
 # from dust3r.model import CroCoNet
 import dust3r.utils.path_to_croco  # noqa: F401
 from models.croco import CroCoNet  # noqa
-from models.blocks import Mlp, Block
+from models.blocks import Mlp
 
 
 import os
 import torchvision.models as tvm
 from spider.utils.misc import interleave_list, transpose_to_landscape_warp
 from spider.heads import head_factory
-
+from spider.blocks import BlockInject, Block_embed
 import pdb
 
 inf = float('inf')
@@ -281,7 +281,7 @@ class RelPoseEmbedGenerator(nn.Module):
 class PoseFiLM_var(nn.Module):
     def __init__(self, pose_dim, hidden, channel_list):
         super().__init__()
-        self.mlp = Mlp(12, 4*hidden, hidden)
+        self.mlp = Mlp(pose_dim, 4*hidden, hidden)
 
         self.gammas = nn.ModuleList()
         self.betas  = nn.ModuleList()
@@ -301,12 +301,57 @@ class PoseFiLM_var(nn.Module):
             beta_list.append(b_layer(h))     # (B, c_k)
         return gamma_list, beta_list
 
+class PoseTokenAttn(nn.Module):
+    def __init__(self, pose_dim, channel_list,
+                 n_head=8, n_layer=1):
+        super().__init__()
+        self.pose_embed = nn.ModuleList([
+            Mlp(pose_dim, C*4, C) for C in channel_list
+        ])
+
+        self.attns1 = nn.ModuleList()
+        for C in channel_list:
+            block = nn.TransformerEncoder(
+                nn.TransformerEncoderLayer(d_model=C,
+                                           nhead=n_head,
+                                           batch_first=True),
+                num_layers=n_layer
+            )
+            self.attns1.append(block)
+
+        self.attns2 = nn.ModuleList()
+        for C in channel_list:
+            block = nn.TransformerEncoder(
+                nn.TransformerEncoderLayer(d_model=C,
+                                           nhead=n_head,
+                                           batch_first=True),
+                num_layers=n_layer
+            )
+            self.attns2.append(block)
+
+    def forward(self, dec_output, relpose1, relpose2):
+        outputs_with_relpose = []
+        for (f1, f2), proj_pose, block1, block2 in zip(dec_output, self.pose_embed, self.attns1, self.attns2):
+            t1 = proj_pose(relpose1[:, :3].flatten(1)).unsqueeze(1)
+            f1 = torch.cat([t1, f1], dim=1)
+            f1 = block1(f1)
+
+            t2 = proj_pose(relpose2[:, :3].flatten(1)).unsqueeze(1)
+            f2 = torch.cat([t2, f2], dim=1)
+            f2 = block2(f2)
+            outputs_with_relpose.append((f1[:, 1:], f2[:, 1:]))
+        return zip (*outputs_with_relpose)
+
+
+
+
 class SPIDER_POINTMAP (CroCoNet):
     """ Two siamese encoders, followed by two decoders.
     The goal is to output pointmaps for two images separately
     """
 
     def __init__(self,
+                #  attn_mode='embed',
                  output_mode='pts3d',
                  head_type='linear',
                  depth_mode=('exp', -inf, inf),
@@ -315,29 +360,44 @@ class SPIDER_POINTMAP (CroCoNet):
                  landscape_only=True,
                  patch_embed_cls='PatchEmbedDust3R',  # PatchEmbedDust3R or ManyAR_PatchEmbed
                  **croco_kwargs):
+        
         self.patch_embed_cls = patch_embed_cls
         self.croco_args = fill_default_args(croco_kwargs, super().__init__)
         super().__init__(**croco_kwargs)
-
         
         self.dec_blocks2 = deepcopy(self.dec_blocks)
-        print(self.enc_embed_dim)
-        print(self.dec_embed_dim)
+        # print(self.enc_embed_dim)
+        # print(self.dec_embed_dim)
         
-        channel_list = [self.enc_embed_dim] + [self.dec_embed_dim] * self.dec_depth      # e.g. [1024, 768, 768, ...]
-        # 13
-        self.pose_film1 = PoseFiLM_var(12, self.enc_embed_dim, channel_list)
-        self.pose_film2 = PoseFiLM_var(12, self.enc_embed_dim, channel_list)
-
-
+        # channel_list = [self.enc_embed_dim] + [self.dec_embed_dim] * self.dec_depth      # e.g. [1024, 768, 768, ...]
+        ### Attention
+        # self.attn = PoseTokenAttn(12, channel_list)
+        # self.attn_mode = attn_mode
+        self.pose_embed_enc = Mlp(12, 4*self.enc_embed_dim, self.enc_embed_dim)
+        self.pose_embed_dec = Mlp(12, 4*self.dec_embed_dim, self.dec_embed_dim)
+        self.attn_enc1 = Block_embed(self.enc_embed_dim)
+        self.attn_enc2 = deepcopy(self.attn_enc1)
+        self.attns1 = nn.ModuleList([Block_embed(self.dec_embed_dim) for i in range(self.dec_depth)])
+        self.attns2 = deepcopy(self.attns1)
+        # self.dec_cls = ('_cls' in self.attn_mode)
+        # self.dec_num_cls = 0
+        # if self.dec_cls:
+        #     self.cls_token1 = nn.Parameter(torch.zeros((self.dec_embed_dim,)))
+        #     self.cls_token2 = nn.Parameter(torch.zeros((self.dec_embed_dim,)))
+        #     self.dec_num_cls = 1
+        # self.attns1 = nn.ModuleList([Block_embed(self.dec_embed_dim) for i in range(self.dec_depth)])
+        # self.attns2 = deepcopy(self.attns1)
+        # self.init_attn_blocks()
+        # DecoderBlock(dec_embed_dim, dec_num_heads, mlp_ratio=mlp_ratio, qkv_bias=True, norm_layer=norm_layer, norm_mem=norm_im2_in_dec, rope=self.rope)
+        ### FiLM
+        # self.pose_film1 = PoseFiLM_var(12, self.enc_embed_dim, channel_list)
+        # self.pose_film2 = PoseFiLM_var(12, self.enc_embed_dim, channel_list)
 
         ### add embed
         # self.relpose_embed_generators = nn.ModuleList([RelPoseEmbedGenerator(embed_dim=self.enc_embed_dim)] +
+            # [RelPoseEmbedGenerator(embed_dim=self.dec_embed_dim) for _ in range(self.dec_depth)])
+        # self.relpose_embed_generators2 = nn.ModuleList([RelPoseEmbedGenerator(embed_dim=self.enc_embed_dim)] +
         #     [RelPoseEmbedGenerator(embed_dim=self.dec_embed_dim) for _ in range(self.dec_depth)])
-
-        
-        
-
 
         # dec_dim, enc_dim = self.decoder_embed.weight.shape
         # self.attn_enc_block = Block(enc_dim, 12, mlp_ratio=4, qkv_bias=True)
@@ -360,6 +420,11 @@ class SPIDER_POINTMAP (CroCoNet):
         self.set_downstream_head(output_mode, head_type, landscape_only, depth_mode, conf_mode, **croco_kwargs)
         self.set_freeze(freeze)
         
+    def init_attn_blocks(self):
+        for i in range(len(self.attns1)):
+            for blocks in [self.attns1, self.attns2]:
+                block = blocks[i]
+                block.init(self.dec_embed_dim)
 
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kw):
@@ -485,7 +550,7 @@ class SPIDER_POINTMAP (CroCoNet):
         head = getattr(self, f'head{head_num}')
         return head(decout, img_shape)
 
-    def _decoder_with_relpose(self, decoder_output, relpose1, relpose2):
+    def _decoder_with_relpose(self, decoder_output, relpose1=None, relpose2=None):
         # relpose_embeds1 = [generator(relpose1[:, :3].flatten(1)).unsqueeze(1) for generator in self.relpose_embed_generators]
         # relpose_embeds2 = [generator(relpose2[:, :3].flatten(1)).unsqueeze(1) for generator in self.relpose_embed_generators]
 
@@ -496,35 +561,111 @@ class SPIDER_POINTMAP (CroCoNet):
         #     outputs_with_relpose.append((f1, f2))
         # return zip(*outputs_with_relpose)
 
-        self.gamma_list1, self.beta_list1 = self.pose_film1(relpose1[:, :3].flatten(1))     # 13 x (B, c_k)
-        self.gamma_list2, self.beta_list2 = self.pose_film2(relpose2[:, :3].flatten(1))
-        outputs_with_relpose = []
-        for i, (f1, f2) in enumerate(decoder_output):            # feat: (B, N, c_k)
-            g1 = gamma_list1[i].unsqueeze(1)              # (B,1,c_k)
-            b1 = beta_list1[i].unsqueeze(1)
-            g2 = gamma_list2[i].unsqueeze(1)              # (B,1,c_k)
-            b2 = beta_list2[i].unsqueeze(1)
-            f1 = f1 * (1 + g1) + bl
-            f2 = f2 * (1 + g2) + b2
-            outputs_with_relpose.append((f1, f2))
-        return zip (*outputs_with_relpose)
+        # gamma_list1, beta_list1 = self.pose_film1(relpose1[:, :3].flatten(1))     # 13 x (B, c_k)
+        # gamma_list2, beta_list2 = self.pose_film2(relpose2[:, :3].flatten(1))
+        # outputs_with_relpose = []
+        # for i, (f1, f2) in enumerate(decoder_output):            # feat: (B, N, c_k)
+        #     g1 = gamma_list1[i].unsqueeze(1)              # (B,1,c_k)
+        #     b1 = beta_list1[i].unsqueeze(1)
+        #     g2 = gamma_list2[i].unsqueeze(1)              # (B,1,c_k)
+        #     b2 = beta_list2[i].unsqueeze(1)
+        #     f1 = f1 * (1 + g1) + b1
+        #     f2 = f2 * (1 + g2) + b2
+        #     outputs_with_relpose.append((f1, f2))
+        # return zip (*outputs_with_relpose)
 
+        # outputs_with_relpose = []
+        # f1, f2 = decoder_output[0]
+        # outputs_with_relpose.append((f1, f2))
+        # cls1 = self.cls_token1[None,None].expand(len(f1),1,-1).clone()
+        # cls2 = self.cls_token2[None,None].expand(len(f2),1,-1).clone()
+        # pose_emb1 = self.pose_embed(relpose1[:,:3].flatten(1)).unsqueeze(1)
+        # pose_emb2 = self.pose_embed(relpose2[:,:3].flatten(1)).unsqueeze(1)
+        # cls1 = cls1 + pose_emb1
+        # cls2 = cls2 + pose_emb2
+        # new_pos1 = torch.cat((-pos1.new_ones(len(cls1), 1, 2), pos1), dim=1)
+        # new_pos2 = torch.cat((-pos2.new_ones(len(cls2), 1, 2), pos2), dim=1)
+        # for i, (f_dec, blk1, blk2) in enumerate(zip(decoder_output[1:], self.attns1, self.attns2)):
+        #     f1, f2 = f_dec
+        #     f1 = torch.cat((cls1, f1), dim=1)
+        #     f2 = torch.cat((cls2, f2), dim=1)
+        #     f1, _ = blk1(f1, f2, new_pos1, new_pos2, relpose=pose_emb1, num_cls=self.dec_num_cls)
+        #     f2, _ = blk2(f2, f1, new_pos2, new_pos1, relpose=pose_emb2, num_cls=self.dec_num_cls)
+        #     outputs_with_relpose.append((f1[:,1:], f2[:,1:]))
+        # return zip(*outputs_with_relpose)
+
+        # outputs_with_relpose = []
+        # if relpose1 is not None:
+        #     pose_emb1 = self.pose_embed(relpose1[:,:3].flatten(1)).unsqueeze(1)
+        # else:
+        #     pose_emb1 = None
+        # if relpose2 is not None:
+        #     pose_emb2 = self.pose_embed(relpose2[:,:3].flatten(1)).unsqueeze(1)
+        # else:
+        #     pose_emb2 = None
+
+        # f1, f2 = decoder_output[0]
+        # outputs_with_relpose.append((f1, f2))
+        # for i, (f_dec, blk1, blk2) in enumerate(zip(decoder_output[1:], self.attns1, self.attns2)):
+        #     f1, f2 = f_dec
+        #     if pose_emb1 is not None:
+        #         f1 = f1 + pose_emb1
+        #     if pose_emb2 is not None:
+        #         f2 = f2 + pose_emb2
+        #     f1 = blk1(f1)
+        #     f2 = blk2(f2)
+        #     outputs_with_relpose.append((f1, f2))
+        # return zip(*outputs_with_relpose)
+    
+        outputs_with_relpose = []
+        if relpose1 is not None:
+            pose_emb_enc1 = self.pose_embed_enc(relpose1[:,:3].flatten(1)).unsqueeze(1)
+            pose_emb_dec1 = self.pose_embed_dec(relpose1[:,:3].flatten(1)).unsqueeze(1)
+        else:
+            pose_emb_enc1 = None
+            pose_emb_dec1 = None
+        if relpose2 is not None:
+            pose_emb_enc2 = self.pose_embed_enc(relpose2[:,:3].flatten(1)).unsqueeze(1)
+            pose_emb_dec2 = self.pose_embed_dec(relpose2[:,:3].flatten(1)).unsqueeze(1)
+        else:
+            pose_emb_enc2 = None
+            pose_emb_dec2 = None
+        f1, f2 = decoder_output[0]
+        if pose_emb_enc1 is not None:
+            f1 = f1 + pose_emb_enc1
+        if pose_emb_enc2 is not None:
+            f2 = f2 + pose_emb_enc2
+        f1 = self.attn_enc1(f1)
+        f2 = self.attn_enc2(f2)
+        outputs_with_relpose.append((f1, f2))
+        for i, (f_dec, blk1, blk2) in enumerate(zip(decoder_output[1:], self.attns1, self.attns2)):
+            f1, f2 = f_dec
+            if pose_emb_dec1 is not None:
+                f1 = f1 + pose_emb_dec1
+            if pose_emb_dec2 is not None:
+                f2 = f2 + pose_emb_dec2
+            f1 = blk1(f1)
+            f2 = blk2(f2)
+            outputs_with_relpose.append((f1, f2))
+        return zip(*outputs_with_relpose)
+        
     def forward(self, view1, view2):
         # encode the two images --> B,S,D
         (shape1, shape2), (feat1, feat2), (pos1, pos2) = self._encode_symmetrized(view1, view2)
         
         relpose1 = view1.get('known_pose')
         relpose2 = view2.get('known_pose')
-        if relpose1 is not None and relpose2 is not None:
-            decoder_output = self._decoder(feat1, pos1, feat2, pos2)
-            dec1, dec2 = self._decoder_with_relpose(decoder_output, relpose1, relpose2)
-            print('adding relpose')
+        # pdb.set_trace()
+        decoder_output = self._decoder(feat1, pos1, feat2, pos2)
+        dec1, dec2 = self._decoder_with_relpose(decoder_output, relpose1, relpose2)
+        
+        #     # dec1, dec2 = self.attn(decoder_output, relpose1, relpose2)
+        #     print('adding relpose')
             
-
-        else:
-            final_output = self._decoder(feat1, pos1, feat2, pos2)
-            dec1, dec2 = zip(*final_output)
-
+        # else:
+        #     final_output = self._decoder(feat1, pos1, feat2, pos2)
+        #     dec1, dec2 = zip(*final_output)
+        
         # f1 = dec1[-1]
         # f2 = dec1[-1]
         # # combine all ref images into object-centric representation

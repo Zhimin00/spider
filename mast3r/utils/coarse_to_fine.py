@@ -5,7 +5,7 @@
 # coarse to fine utilities
 # --------------------------------------------------------
 import numpy as np
-
+import pdb
 
 def crop_tag(cell):
     return f'[{cell[1]}:{cell[3]},{cell[0]}:{cell[2]}]'

@@ -33,7 +33,7 @@ from dust3r.viz import add_scene_cam, CAM_COLORS, OPENGL, pts3d_to_trimesh, cat_
 from dust3r.demo import get_args_parser as dust3r_get_args_parser
 
 import matplotlib.pyplot as pl
-
+import pdb
 
 class SparseGAState:
     def __init__(self, sparse_ga, should_delete=False, cache_dir=None, outfile_name=None):
@@ -156,7 +156,8 @@ def get_reconstructed_scene(outdir, gradio_delete_cache, model, retrieval_model,
         imgs = [imgs[0], copy.deepcopy(imgs[0])]
         imgs[1]['idx'] = 1
         filelist = [filelist[0], filelist[0] + '_2']
-
+    pdb.set_trace()
+    print(winsize)
     scene_graph_params = [scenegraph_type]
     if scenegraph_type in ["swin", "logwin"]:
         scene_graph_params.append(str(winsize))
@@ -183,6 +184,7 @@ def get_reconstructed_scene(outdir, gradio_delete_cache, model, retrieval_model,
         torch.cuda.empty_cache()
 
     pairs = make_pairs(imgs, scene_graph=scene_graph, prefilter=None, symmetrize=True, sim_mat=sim_matrix)
+    pdb.set_trace()
     if optim_level == 'coarse':
         niter2 = 0
     # Sparse GA (forward mast3r -> matching -> 3D optim -> 2D refinement -> triangulation)

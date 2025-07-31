@@ -385,11 +385,11 @@ def print_auxiliary_info(*input_views):
     view_tags = []
     for i,view in enumerate(input_views, 1):
         tags = []
-        if 'camera_intrinsics' in view:
+        if 'known_rays' in view:
             tags.append(f'K{i}')
-        if 'camera_pose' in view:
+        if 'known_pose' in view:
             tags.append(f'P{i}')
-        if 'depthmap' in view:
+        if 'known_depth' in view:
             tags.append(f'D{i}')
         print(f'>> Receiving {{{"+".join(tags)}}} for view{i}')
         view_tags.append(tags)
@@ -440,7 +440,7 @@ def inference_relpose(pairs, model, device, batch_size=8, verbose=True):
 
 def inference_of_one_batch(batch, model, device, symmetrize_batch=False, use_amp=False, ret=None):
     view1, view2 = batch
-    print_auxiliary_info(view1, view2)
+    
     ignore_keys = set(['depthmap', 'dataset', 'label', 'instance', 'idx', 'true_shape', 'rng', 'name'])
     for view in batch:
         for name in view.keys():  # pseudo_focal
@@ -460,6 +460,7 @@ def inference_of_one_batch(batch, model, device, symmetrize_batch=False, use_amp
             # pdb.set_trace()
             add_relpose(view1, cam2_to_world=cam2, cam1_to_world=cam1)
             add_relpose(view2, cam2_to_world=cam2, cam1_to_world=cam1)
+            print_auxiliary_info(view1, view2)
             pred1, pred2 = model(view1, view2)
 
     result = dict(view1=view1, view2=view2, pred1=pred1, pred2=pred2)
@@ -499,11 +500,11 @@ if __name__ == '__main__':
 
     
     
-    model = SPIDER_POINTMAP.from_pretrained("/cis/home/zshao14/checkpoints/aerialdust3r_relpose_dpt512_0716/checkpoint-best.pth").to('cuda')
-    # model = Spider.from_pretrained("/cis/home/zshao14/checkpoints/spider_aerialdust3r_relpose/checkpoint-best.pth").to('cuda')
+    model = SPIDER_POINTMAP.from_pretrained("/cis/home/zshao14/checkpoints/aerialdust3r_relpose_dpt512_embed1and2_0728/checkpoint-final.pth").to('cuda')
+    # model = Spider.from_pretrained("/cis/home/zshao14/checkpoints/spider_aerialdust3r_relpose/checkpoint-final.pth").to('cuda')
     
     per_building_results = {}
-    outdir_path = '/cis/net/io96/data/zshao/JHU-results/spider_dust3r_dpt512_ga_gt'
+    outdir_path = '/cis/net/io96/data/zshao/JHU-results/spider_dust3r_dpt512_Blockembed_final'
     os.makedirs(outdir_path, exist_ok=True)
 
     for dir_name in sorted(os.listdir(datasets_path)):
@@ -539,8 +540,8 @@ if __name__ == '__main__':
 
 
         gt_se3 = align_to_first_camera(gt_extrinsics)
-        # pred_extrinsics1 = get_reconstructed_scene_with_known_pose(sampled_img_path, model, poses=None, outdir=output_folder)
-        pred_extrinsics1 = get_reconstructed_scene_with_known_pose(sampled_img_path, model, gt_poses, output_folder)
+        pred_extrinsics1 = get_reconstructed_scene_with_known_pose(sampled_img_path, model, poses=None, outdir=output_folder)
+        # pred_extrinsics1 = get_reconstructed_scene_with_known_pose(sampled_img_path, model, gt_poses, output_folder)
         # pred_extrinsics2 = get_reconstructed_scene_with_known_pose(sampled_img_path, model, est_poses)
 
         pred1_se3 = align_to_first_camera(pred_extrinsics1.cpu().detach())

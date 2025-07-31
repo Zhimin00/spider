@@ -6,11 +6,12 @@
 # --------------------------------------------------------
 import tqdm
 import torch
+from mast3r.utils.collate import cat_collate, cat_collate_fn_map
 import spider.utils.path_to_dust3r #noqa
 from dust3r.utils.device import to_cpu, collate_with_cat
 from dust3r.utils.misc import invalid_to_nans
 from dust3r.utils.geometry import depthmap_to_pts3d, geotrf
-
+import pdb
 
 def _interleave_imgs(img1, img2):
     res = {}
@@ -86,7 +87,6 @@ def inference(pairs, model, device, batch_size=8, verbose=True):
     if verbose:
         print(f'>> Inference with model on {len(pairs)} image pairs')
     result = []
-
     # first, check if all images have the same size
     multiple_shapes = not (check_if_same_size(pairs))
     if multiple_shapes:  # force bs=1
@@ -156,6 +156,24 @@ def inference_upsample_cuda(pairs, upsample_pairs, model, device, batch_size=8, 
 
     result = collate_with_cat(result, lists=multiple_shapes)
     return result
+
+@torch.no_grad()
+def crops_inference(pairs, model, device, batch_size=48, verbose=True):
+    assert len(pairs) == 2, "Error, data should be a tuple of dicts containing the batch of image pairs"
+    # Forward a possibly big bunch of data, by blocks of batch_size
+    B = pairs[0]['img'].shape[0]
+    if B < batch_size:
+        return loss_of_one_batch(pairs, model, None, device=device, symmetrize_batch=False)
+    preds = []
+    for ii in range(0, B, batch_size):
+        sel = slice(ii, ii + min(B - ii, batch_size))
+        temp_data = [{}, {}]
+        for di in [0, 1]:
+            temp_data[di] = {kk: pairs[di][kk][sel]
+                             for kk in pairs[di].keys() if pairs[di][kk] is not None}  # copy chunk for forward
+        preds.append(loss_of_one_batch(temp_data, model,
+                                       None, device=device, symmetrize_batch=False))  # sequential forward
+    return cat_collate(preds, collate_fn_map=cat_collate_fn_map)
 
 def check_if_same_size(pairs):
     shapes1 = [img1['img'].shape[-2:] for img1, img2 in pairs]

@@ -1,6 +1,7 @@
 from spider.model import SPIDER
-from spider.utils.utils import compute_relative_pose, estimate_pose, compute_pose_error, pose_auc, match_symmetric, sample_symmetric, to_pixel_coordinates
-from spider.inference import inference
+from spider.utils.utils import compute_relative_pose, estimate_pose, compute_pose_error, pose_auc, match_symmetric, match_symmetric_upsample, sample_symmetric, to_pixel_coordinates, make_symmetric_pairs, tensor_to_pil
+from spider.utils.image import load_images_with_intrinsics
+from spider.inference import inference, inference_upsample
 import spider.utils.path_to_dust3r #noqa
 from dust3r.image_pairs import make_pairs
 from dust3r.utils.image import load_images
@@ -33,7 +34,7 @@ def tensor_to_pil(x, unnormalize=False):
 
 if __name__ == '__main__':
     device = 'cuda'
-    model = SPIDER.from_pretrained("/cis/home/zshao14/checkpoints/spider_warp/checkpoint-last.pth").to(device)
+    model = SPIDER.from_pretrained("/cis/home/zshao14/checkpoints/spider_warp_0716/checkpoint-last.pth").to(device)
     # im1_path = '/cis/net/r24a/data/zshao/data/wriva_processed_data/cross-view/A01/A01_s07/input/images/image_000001.jpg'
     # im2_path = '/cis/net/r24a/data/zshao/data/wriva_processed_data/cross-view/A01/A01_s07/input/images/image_000004.jpg'
     # im1_path = '/cis/net/r24a/data/zshao/data/wriva_processed_data/cross-view/BLH0001/input/images/image_000075.JPG'
@@ -41,18 +42,27 @@ if __name__ == '__main__':
     # im1_path = '/cis/net/r24a/data/zshao/data/wriva_processed_data/cross-view/M07/airborne/images/image_000003.jpg'
     # im2_path = '/cis/net/r24a/data/zshao/data/wriva_processed_data/cross-view/M07/ground/images/image_000001.jpg'
 
-    dir_name = 'SaintPeter'#'habitat_vangogh'#'co3d_apple'# 'SaintPeter'#'toronto'
+    dir_name = 'M07_aerial'#'SaintPeter'#'habitat_vangogh'#'co3d_apple'# 'SaintPeter'#'toronto'
     im1_path = f'/cis/home/zshao14/Downloads/spider/assets/{dir_name}/{dir_name}_A.jpg'
     im2_path = f'/cis/home/zshao14/Downloads/spider/assets/{dir_name}/{dir_name}_B.jpg'
     save_dir = f'/cis/home/zshao14/Downloads/spider/assets/{dir_name}'
     
-    imgs = load_images([im1_path, im2_path], size=512, square_ok=True)
-    image_pairs = []
-    image_pairs.append((imgs[0], imgs[1]))
-    image_pairs.append((imgs[1], imgs[0]))
-    res = inference(image_pairs, model, device, batch_size=1, verbose=True)
+    # imgs = load_images([im1_path, im2_path], size=512, square_ok=True)
+    # image_pairs = []
+    # image_pairs.append((imgs[0], imgs[1]))
+    # image_pairs.append((imgs[1], imgs[0]))
+    # res = inference(image_pairs, model, device, batch_size=1, verbose=True)
+    # view1, view2 = res['view1'], res['view2']
+    # warp1, certainty1, warp2, certainty2 = match_symmetric(res['corresps'])
+    # sparse_matches, _ = sample_symmetric(warp1, certainty1, warp2, certainty2, num=5000)
+    
+    imgs, _ = load_images_with_intrinsics([im1_path, im2_path], size=512, intrinsics=None)
+    imgs_large, _ = load_images_with_intrinsics([im1_path, im2_path], size=1344, intrinsics=None)
+    image_pairs = make_symmetric_pairs(imgs)
+    image_large_pairs = make_symmetric_pairs(imgs_large)
+    res = inference_upsample(image_pairs, image_large_pairs, model, device, batch_size=1, verbose=True)
     view1, view2 = res['view1'], res['view2']
-    warp1, certainty1, warp2, certainty2 = match_symmetric(res['corresps'])
+    warp1, certainty1, warp2, certainty2 = match_symmetric_upsample(res['corresps'], res['low_corresps'])
     sparse_matches, _ = sample_symmetric(warp1, certainty1, warp2, certainty2, num=5000)
     
     # H0, W0 = imgs[0]['true_shape'][0]
@@ -81,7 +91,7 @@ if __name__ == '__main__':
 
 
     num_matches = len(matches_im0)
-    n_viz = 100
+    n_viz = 20
     match_idx_to_viz = np.round(np.linspace(0, num_matches - 1, n_viz)).astype(int)
     viz_matches_im0, viz_matches_im1 = matches_im0[match_idx_to_viz], matches_im1[match_idx_to_viz]
     img0 = np.pad(viz_imgs[0], ((0, max(H1 - H0, 0)), (0, 0), (0, 0)), 'constant', constant_values=0)

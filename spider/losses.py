@@ -224,7 +224,7 @@ class PCK(nn.Module):
 
     def forward(self, view1, view2, corresps):
         img2 = view2['img']
-        B = img2.shape[0]
+        B, THREE, h2, w2 = img2.shape
         # Recover true_shape when available, otherwise assume that the img shape is the true one
         shape2 = view2.get('true_shape', torch.tensor(img2.shape[-2:])[None].repeat(B, 1))
         height2, width2 = shape2.T
@@ -234,12 +234,47 @@ class PCK(nn.Module):
         T_1to2 = torch.matmul(torch.linalg.inv(T2), T1)
         K1 = opencv_to_colmap_intrinsics(view1['camera_intrinsics'])
         K2 = opencv_to_colmap_intrinsics(view2['camera_intrinsics'])
+        # K1 = view1['camera_intrinsics']
+        # K2 = view2['camera_intrinsics']
         # pdb.set_trace()
-        matches, certainty = self.match(corresps)
+        im_A_to_im_B = corresps[1]["flow"] 
+        _, _, h, w = im_A_to_im_B.shape
+        gt_warp, gt_prob = get_gt_warp(                
+                view1['depthmap'],
+                view2['depthmap'],
+                T_1to2,
+                K1,
+                K2,
+                H=h,
+                W=w,
+            )
+        x2 = gt_warp.float()
+        prob = gt_prob
+        
+        im_A_to_im_B = im_A_to_im_B.permute(0, 2, 3, 1)
+        im_A_to_im_B[is_2port] = im_A_to_im_B[is_2port][..., [1,0]]
 
-        epe, pck_1, pck_3, pck_5, prob = self.geometric_dist(
-             view1['depthmap'], view2['depthmap'], T_1to2, K1, K2, matches, is_2port, height2, width2
-        )
+        x2_hat = torch.clamp(im_A_to_im_B, -1, 1)
+        
+        x2 = torch.stack(
+                (w2 * (x2[..., 0] + 1) / 2, h2 * (x2[..., 1] + 1) / 2), dim=-1
+            )
+        x2_hat = torch.stack(
+                (w2 * (x2_hat[..., 0] + 1) / 2, h2 * (x2_hat[..., 1] + 1) / 2), dim=-1
+            )  
+
+        gd = (x2_hat - x2).norm(dim=-1)
+        gd = gd[prob == 1]
+        pck_1 = (gd < 1.0).float().mean()
+        pck_3 = (gd < 3.0).float().mean()
+        pck_5 = (gd < 5.0).float().mean()
+        epe = gd.float().mean()  
+        # pdb.set_trace()
+        # matches, certainty = self.match(corresps)
+
+        # epe, pck_1, pck_3, pck_5, prob = self.geometric_dist(
+        #      view1['depthmap'], view2['depthmap'], T_1to2, K1, K2, matches, is_2port, height2, width2
+        # )
        
         return epe, dict(epe=epe, pck1 = pck_1, pck3 = pck_3, pck5 = pck_5)
 
@@ -406,7 +441,7 @@ class RobustLosses(nn.Module):
                 delta_cls_losses = self.delta_cls_loss(x2, prob, flow_pre_delta, delta_cls, scale_certainty, scale, offset_scale)
                 delta_cls_loss = self.ce_weight * delta_cls_losses[f"delta_certainty_loss_{scale}"] + delta_cls_losses[f"delta_cls_loss_{scale}"]
                 tot_loss = tot_loss + scale_weights[scale] * delta_cls_loss
-                details.update(Delta_cls_losses)
+                details.update(delta_cls_losses)
             else:
                 delta_regression_losses = self.regression_loss(x2, prob, flow, scale_certainty, scale)
                 reg_loss = self.ce_weight * delta_regression_losses[f"delta_certainty_loss_{scale}"] + delta_regression_losses[f"delta_regression_loss_{scale}"]

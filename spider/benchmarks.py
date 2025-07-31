@@ -733,12 +733,12 @@ class ScanNetBenchmark:
                 K1, K2 = intrinsics
                 h1, w1 = imgs_large[0]['true_shape'][0]
                 h2, w2 = imgs_large[1]['true_shape'][0]
-                # scale1 = 480 / min(w1, h1)
-                # scale2 = 480 / min(w2, h2)
-                # w1, h1 = scale1 * w1, scale1 * h1
-                # w2, h2 = scale2 * w2, scale2 * h2
-                # K1 = K1 * scale1
-                # K2 = K2 * scale2
+                scale1 = 480 / min(w1, h1)
+                scale2 = 480 / min(w2, h2)
+                w1, h1 = scale1 * w1, scale1 * h1
+                w2, h2 = scale2 * w2, scale2 * h2
+                K1 = K1 * scale1
+                K2 = K2 * scale2
 
                 # kpts1, kpts2 = to_pixel_coordinates(sparse_matches, h1, w1, h2, w2)
                               
@@ -802,6 +802,7 @@ class ScanNetBenchmark:
             map_5 = acc_5
             map_10 = np.mean([acc_5, acc_10])
             map_20 = np.mean([acc_5, acc_10, acc_15, acc_20])
+            print(f"{model_name} auc: {auc}")
             return {
                 "auc_5": auc[0],
                 "auc_10": auc[1],

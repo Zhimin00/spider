@@ -12,6 +12,8 @@ from dust3r.utils.device import to_cpu, collate_with_cat
 from dust3r.utils.misc import invalid_to_nans
 from dust3r.utils.geometry import depthmap_to_pts3d, geotrf
 import pdb
+import gc
+import time
 
 def _interleave_imgs(img1, img2):
     res = {}
@@ -30,6 +32,74 @@ def make_batch_symmetric(batch):
     view1, view2 = (_interleave_imgs(view1, view2), _interleave_imgs(view2, view1))
     return view1, view2
 
+
+@torch.no_grad()
+def symmetric_inference(model, img1, img2, device):
+    # combine all ref images into object-centric representation
+    shape1 = img1['true_shape'].to(device, non_blocking=True)
+    shape2 = img2['true_shape'].to(device, non_blocking=True)
+    img1 = img1['img'].to(device, non_blocking=True)
+    img2 = img2['img'].to(device, non_blocking=True)
+    # compute encoder only once
+    feat1, feat2, pos1, pos2, cnn_feats1, cnn_feats2 = model._encode_image_pairs(img1, img2, shape1, shape2)
+
+    def decoder(feat1, feat2, pos1, pos2, shape1, shape2, cnn_feats1, cnn_feats2):
+        dec1, dec2 = model._decoder(feat1, pos1, feat2, pos2)
+        enc_output1, dec_output1 = dec1[0], dec1[-1]
+        enc_output2, dec_output2 = dec2[0], dec2[-1]
+        feat16_1 = torch.cat([enc_output1, dec_output1], dim=-1)
+        feat16_2 = torch.cat([enc_output2, dec_output2], dim=-1)
+        cnn_feats1.append(feat16_1)
+        cnn_feats2.append(feat16_2)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning)
+            with torch.cuda.amp.autocast(enabled=False):
+                corresps = model._downstream_head(1, cnn_feats1, cnn_feats2, shape1, shape2)
+        return corresps
+
+    # decoder 1-2
+    corresps12 = decoder(feat1, feat2, pos1, pos2, shape1, shape2, cnn_feats1, cnn_feats2)
+    # decoder 2-1
+    corresps21 = decoder(feat2, feat1, pos2, pos1, shape2, shape1, cnn_feats2, cnn_feats1)
+
+    return (corresps12, corresps21)
+
+@torch.no_grad()
+def symmetric_inference_upsample(model, img1_coarse, img2_coarse, img1, img2, device):
+    # combine all ref images into object-centric representation
+    low_corresps12, low_corresps21 = symmetric_inference(model, img1_coarse, img2_coarse, device)
+    shape1 = img1['true_shape'].to(device, non_blocking=True)
+    shape2 = img2['true_shape'].to(device, non_blocking=True)
+    img1 = img1['img'].to(device, non_blocking=True)
+    img2 = img2['img'].to(device, non_blocking=True)
+    # compute encoder only once
+    feat1, feat2, pos1, pos2, cnn_feats1, cnn_feats2 = model._encode_image_pairs(img1, img2, shape1, shape2)
+    
+    def decoder(feat1, feat2, pos1, pos2, shape1, shape2, cnn_feats1, cnn_feats2, finest_corresps=None):
+        dec1, dec2 = model._decoder(feat1, pos1, feat2, pos2)
+        enc_output1, dec_output1 = dec1[0], dec1[-1]
+        enc_output2, dec_output2 = dec2[0], dec2[-1]
+        feat16_1 = torch.cat([enc_output1, dec_output1], dim=-1)
+        feat16_2 = torch.cat([enc_output2, dec_output2], dim=-1)
+        # cnn_feats1.append(feat16_1)
+        # cnn_feats2.append(feat16_2)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning)
+            with torch.cuda.amp.autocast(enabled=False):
+                corresps = model._downstream_head(1, cnn_feats1 + [feat16_1], cnn_feats2 + [feat16_2], shape1, shape2, upsample=True, finest_corresps=finest_corresps)
+        return corresps
+
+    # decoder 1-2
+    corresps12 = decoder(feat1, feat2, pos1, pos2, shape1, shape2, cnn_feats1, cnn_feats2, finest_corresps=low_corresps12[1])
+    # decoder 2-1
+    corresps21 = decoder(feat2, feat1, pos2, pos1, shape2, shape1, cnn_feats2, cnn_feats1, finest_corresps=low_corresps21[1])
+    torch.cuda.empty_cache()
+    time.sleep(0.2)
+    # time.sleep(0.01)
+
+    return (low_corresps12, corresps12, low_corresps21, corresps21)
 
 def loss_of_one_batch(batch, model, criterion, device, symmetrize_batch=False, use_amp=False, ret=None):
     view1, view2 = batch
@@ -55,31 +125,42 @@ def loss_of_one_batch(batch, model, criterion, device, symmetrize_batch=False, u
     return result[ret] if ret else result
 
 def loss_of_one_batch_upsample(batch, upsample_batch, model, criterion, device, use_amp=False, ret=None):
-    view1, view2 = batch
-    ignore_keys = set(['pts3d', 'dataset', 'label', 'instance', 'idx', 'true_shape', 'rng'])
-    for view in batch:
-        for name in view.keys():  # pseudo_focal
-            if name in ignore_keys:
-                continue
-            view[name] = view[name].to(device, non_blocking=True)
-    view1_upsample, view2_upsample = upsample_batch
-    for view in upsample_batch:
-        for name in view.keys():  # pseudo_focal
-            if name in ignore_keys:
-                continue
-            view[name] = view[name].to(device, non_blocking=True)
-    import warnings
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=FutureWarning)
-        with torch.cuda.amp.autocast(enabled=bool(use_amp)):
-            low_corresps = model(view1, view2)
-            finest_corresps = low_corresps[1]
-            corresps = model.match(view1_upsample, view2_upsample, finest_corresps)
-            # loss is supposed to be symmetric
-            with torch.cuda.amp.autocast(enabled=False):
-                loss = criterion(view1_upsample, view2_upsample, corresps) if criterion is not None else None
-            
-    result = dict(view1=view1_upsample, view2=view2_upsample, corresps=corresps, loss=loss, low_corresps=low_corresps)
+    ignore_keys = {'pts3d', 'dataset', 'label', 'instance', 'idx', 'true_shape', 'rng'}
+
+    def move_to_device(view_list):
+        for view in view_list:
+            for k, v in view.items():
+                if k not in ignore_keys:
+                    view[k] = v.to(device, non_blocking=True)
+        return view_list
+
+    # Move low-res views to device
+    view1, view2 = move_to_device(batch)
+    # Forward pass (low-res)
+    with torch.cuda.amp.autocast(enabled=use_amp):
+        low_corresps = model(view1, view2)
+        finest_corresps = low_corresps[1]
+
+    # Move high-res views to device
+    view1_up, view2_up = move_to_device(upsample_batch)
+
+    # Forward match (high-res)
+    with torch.cuda.amp.autocast(enabled=use_amp):
+        corresps = model.match(view1_up, view2_up, finest_corresps)
+
+    # Optional loss
+    loss = None
+    if criterion is not None:
+        with torch.cuda.amp.autocast(enabled=False):  # loss in full precision
+            loss = criterion(view1_up, view2_up, corresps)
+
+    # Optionally clean up
+    result = {
+        'corresps': corresps,
+        'loss': loss,
+        'low_corresps': low_corresps
+    }
+
     return result[ret] if ret else result
 
 @torch.no_grad()
@@ -114,6 +195,8 @@ def inference_upsample(pairs, upsample_pairs, model, device, batch_size=8, verbo
     for i in tqdm.trange(0, len(pairs), batch_size, disable=not verbose):
         res = loss_of_one_batch_upsample(collate_with_cat(pairs[i:i + batch_size]), collate_with_cat(upsample_pairs[i:i + batch_size]), model, None, device)
         result.append(to_cpu(res))
+        torch.cuda.empty_cache()
+        time.sleep(0.01)
 
     result = collate_with_cat(result, lists=multiple_shapes)
 
@@ -153,6 +236,8 @@ def inference_upsample_cuda(pairs, upsample_pairs, model, device, batch_size=8, 
     for i in tqdm.trange(0, len(pairs), batch_size, disable=not verbose):
         res = loss_of_one_batch_upsample(collate_with_cat(pairs[i:i + batch_size]), collate_with_cat(upsample_pairs[i:i + batch_size]), model, None, device)
         result.append(res)
+        torch.cuda.empty_cache()
+        time.sleep(0.1)
 
     result = collate_with_cat(result, lists=multiple_shapes)
     return result

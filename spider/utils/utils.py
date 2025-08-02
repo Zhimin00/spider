@@ -103,7 +103,8 @@ def match_single(im_A_to_im_B, certainty, certainty_s16, attenuate_cert=True, in
         certainty:      B, 1, h, w
         certainty_s16:  B, 1, h//16, w//16
     """
-    if not batched:
+    if im_A_to_im_B.ndim == 3:
+        assert batched == False
         im_A_to_im_B, certainty, certainty_s16 = im_A_to_im_B[None], certainty[None], certainty_s16[None]
     b, _, h, w = certainty.shape
     if not batched:
@@ -146,7 +147,23 @@ def match_single(im_A_to_im_B, certainty, certainty_s16, attenuate_cert=True, in
             warp[0], ### h, w, 4
             certainty[0, 0] ### h, w
         )
-   
+
+def match(corresps, attenuate_cert=True, inverse=False):
+    finest_scale = 1
+    im_A_to_im_Bs = corresps[finest_scale]["flow"] 
+    certaintys = corresps[finest_scale]["certainty"]
+    certainty_s16s= corresps[16]["certainty"]
+    warp, certainty = match_single(im_A_to_im_B=im_A_to_im_Bs, certainty=certaintys, certainty_s16=certainty_s16s, attenuate_cert=attenuate_cert, inverse=inverse)
+    return warp, certainty
+
+def match_upsample(corresps, low_corresps, attenuate_cert=True, inverse=False):
+    finest_scale = 1
+    im_A_to_im_Bs = corresps[finest_scale]["flow"] 
+    certaintys = corresps[finest_scale]["certainty"]
+    certainty_s16s= low_corresps[16]["certainty"]
+    warp, certainty = match_single(im_A_to_im_B=im_A_to_im_Bs, certainty=certaintys, certainty_s16=certainty_s16s, attenuate_cert=attenuate_cert, inverse=inverse)
+    return warp, certainty
+
 
 def match_symmetric(corresps, attenuate_cert=True):
     finest_scale = 1

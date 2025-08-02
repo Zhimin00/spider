@@ -51,7 +51,8 @@ if __name__ == "__main__":
 
     model = SPIDER.from_pretrained("/cis/home/zshao14/checkpoints/spider_warp_0727/checkpoint-best.pth").to(device)
     
-    experiment_name = "spider-0727best_1344all"
+    # experiment_name = "spider-0727best_1024"
+    experiment_name = args.exp_name
     seed = 42
     random.seed(seed)
     np.random.seed(seed)
@@ -60,12 +61,12 @@ if __name__ == "__main__":
     torch.backends.cudnn.deterministic = True  # Makes CUDA deterministic
     torch.backends.cudnn.benchmark = False  
     if args.dataset == 'scannet':
-        test_scannet1500(model, experiment_name) 
+        test_scannet1500(model, experiment_name, coarse_size=args.coarse_size, fine_size=args.fine_size) 
     elif args.dataset == 'mega1500':
-        test_mega1500(model, experiment_name)
+        test_mega1500(model, experiment_name, coarse_size=args.coarse_size, fine_size=args.fine_size)
     elif args.dataset == 'aerial':
-        test_aerial(model, experiment_name)
+        test_aerial(model, experiment_name, coarse_size=args.coarse_size, fine_size=args.fine_size)
     elif args.dataset =='hpatches':
-        test_hpatches(model, experiment_name)
+        test_hpatches(model, experiment_name, coarse_size=args.coarse_size, fine_size=args.fine_size)
     elif args.dataset =='mega_fine':
         test_mega_fine(model, experiment_name)

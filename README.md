@@ -25,7 +25,7 @@ See [LICENSE](LICENSE) for more information.
 ```bash
 git clone --recursive https://github.com/Zhimin00/spider.git
 cd spider
-# if you have already cloned mast3r:
+# if you have already cloned spider:
 # git submodule update --init --recursive
 ```
 

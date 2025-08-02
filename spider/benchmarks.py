@@ -658,17 +658,30 @@ class ScanNetBenchmark:
 
                 K1_ori = K.copy()
                 K2_ori = K.copy()
+                if fine_size == coarse_size:
+                    imgs, intrinsics = load_images_with_intrinsics_strict([im_A_path, im_B_path], size=coarse_size, intrinsics=[K1_ori, K2_ori])
+                    image_pairs = make_symmetric_pairs(imgs)
+                    res = inference(image_pairs, model, device, batch_size=1, verbose=True)
+                    warp1, certainty1, warp2, certainty2 = match_symmetric(res['corresps'])
+                    sparse_matches, _ = sample_symmetric(warp1, certainty1, warp2, certainty2, num=5000)
+                    K1, K2 = intrinsics
+                    h1, w1 = imgs[0]['true_shape'][0]
+                    h2, w2 = imgs[1]['true_shape'][0]
 
-                imgs, _ = load_images_with_intrinsics_strict([im_A_path, im_B_path], size=coarse_size, intrinsics=None)
-                imgs_large, intrinsics = load_images_with_intrinsics_strict([im_A_path, im_B_path], size=fine_size, intrinsics=[K1_ori, K2_ori])
-                # if np.all(imgs[0]['true_shape'] == imgs[1]['true_shape']):
-                #     continue
-                image_pairs = make_symmetric_pairs(imgs)
-                image_large_pairs = make_symmetric_pairs(imgs_large)
-                res = inference_upsample(image_pairs, image_large_pairs, model, device, batch_size=1, verbose=True)
+                else:
+                    imgs, _ = load_images_with_intrinsics_strict([im_A_path, im_B_path], size=coarse_size, intrinsics=None)
+                    imgs_large, intrinsics = load_images_with_intrinsics_strict([im_A_path, im_B_path], size=fine_size, intrinsics=[K1_ori, K2_ori])
+                    # if np.all(imgs[0]['true_shape'] == imgs[1]['true_shape']):
+                    #     continue
+                    image_pairs = make_symmetric_pairs(imgs)
+                    image_large_pairs = make_symmetric_pairs(imgs_large)
+                    res = inference_upsample(image_pairs, image_large_pairs, model, device, batch_size=1, verbose=True)
+                    warp1, certainty1, warp2, certainty2 = match_symmetric_upsample(res['corresps'], res['low_corresps'])
                 
-                warp1, certainty1, warp2, certainty2 = match_symmetric_upsample(res['corresps'], res['low_corresps'])
-                sparse_matches, _ = sample_symmetric(warp1, certainty1, warp2, certainty2, num=5000)
+                    sparse_matches, _ = sample_symmetric(warp1, certainty1, warp2, certainty2, num=5000)
+                    K1, K2 = intrinsics
+                    h1, w1 = imgs_large[0]['true_shape'][0]
+                    h2, w2 = imgs_large[1]['true_shape'][0]
                 if debug:
                     from matplotlib import pyplot as pl
                     save_dir = '/cis/home/zshao14/Downloads/spider/assets/scannet_benchmark'
@@ -730,9 +743,7 @@ class ScanNetBenchmark:
                     tensor_to_pil(vis_im1, unnormalize=False).save(os.path.join(save_dir, f'warp_im1.jpg'))
                     tensor_to_pil(vis_im2, unnormalize=False).save(os.path.join(save_dir, f'warp_im2.jpg'))
 
-                K1, K2 = intrinsics
-                h1, w1 = imgs_large[0]['true_shape'][0]
-                h2, w2 = imgs_large[1]['true_shape'][0]
+                
                 scale1 = 480 / min(w1, h1)
                 scale2 = 480 / min(w2, h2)
                 w1, h1 = scale1 * w1, scale1 * h1

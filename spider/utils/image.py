@@ -184,6 +184,78 @@ def load_images_with_intrinsics_strict(folder_or_list, size=512, square_ok=True,
         print(f' (Found {len(imgs)} images)')
     return imgs, Ks
 
+def load_original_images(folder_or_list, verbose=False):
+    if isinstance(folder_or_list, str):
+        if verbose:
+            print(f'>> Loading images from {folder_or_list}')
+        root, folder_content = folder_or_list, sorted(os.listdir(folder_or_list))
+
+    elif isinstance(folder_or_list, list):
+        if verbose:
+            print(f'>> Loading a list of {len(folder_or_list)} images')
+        root, folder_content = '', folder_or_list
+
+    else:
+        raise ValueError(f'bad {folder_or_list=} ({type(folder_or_list)})')
+    supported_images_extensions = ['.jpg', '.jpeg', '.png', '.ppm']
+    if heif_support_enabled:
+        supported_images_extensions += ['.heic', '.heif']
+    supported_images_extensions = tuple(supported_images_extensions)
+
+    imgs = []
+    for idx, path in enumerate(folder_content):
+        if not path.lower().endswith(supported_images_extensions):
+            continue
+        img = exif_transpose(PIL.Image.open(os.path.join(root, path))).convert('RGB')       
+        imgs.append(img)
+        if verbose:
+            print(f' - adding {path}')
+
+    assert imgs, 'no images foud at '+root
+    if verbose:
+        print(f' (Found {len(imgs)} images)')
+    return imgs
+
+def resize_image_with_intrinsics(imgs_ori, size=512, square_ok=True, verbose=True, patch_size=16, intrinsics=None):
+    imgs = []
+    Ks = []
+    for idx, img in enumerate(imgs_ori):
+        W1, H1 = img.size
+        if intrinsics is not None:
+            K_ = intrinsics[idx]
+            if isinstance(K_, np.ndarray):
+                K = K_.copy()
+            elif isinstance(K_, torch.Tensor):
+                K = K_.clone()
+        else:
+            K = None
+        scale = size / max(H1, W1)
+        w_new, h_new = int(round(W1*scale)), int(round(H1*scale))
+        w_new = max(math.ceil(w_new // patch_size), 1) * patch_size
+        h_new = max(math.ceil(h_new // patch_size), 1) * patch_size
+        img = img.resize((w_new, h_new))
+
+        W2, H2 = img.size
+
+        scale_x = W2 / W1
+        scale_y = H2 / H1
+
+        if K is not None:
+            K[0, 0] *= scale_x  # fx
+            K[0, 2] *= scale_x  # cx
+            K[1, 1] *= scale_y  # fy
+            K[1, 2] *= scale_y  # cy
+            Ks.append(K)
+
+        if verbose:
+            print(f' - adding with resolution {W1}x{H1} --> {W2}x{H2}')
+        imgs.append(dict(img=ImgNorm(img)[None], true_shape=torch.from_numpy(np.int32(
+            [img.size[::-1]])), idx=len(imgs), instance=str(len(imgs))))
+       
+    assert imgs, 'no images'
+    if verbose:
+        print(f' (Found {len(imgs)} images)')
+    return imgs, Ks
 
 def load_two_images_with_H(img1_path, img2_path, size=512, square_ok=True, verbose=True, patch_size=16, H_ori=None):
     """ open and convert all images in a list or folder to proper input format for DUSt3R

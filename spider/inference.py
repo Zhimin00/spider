@@ -49,13 +49,13 @@ def symmetric_inference(model, img1, img2, device):
         enc_output2, dec_output2 = dec2[0], dec2[-1]
         feat16_1 = torch.cat([enc_output1, dec_output1], dim=-1)
         feat16_2 = torch.cat([enc_output2, dec_output2], dim=-1)
-        cnn_feats1.append(feat16_1)
-        cnn_feats2.append(feat16_2)
+        # cnn_feats1.append(feat16_1)
+        # cnn_feats2.append(feat16_2)
         import warnings
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=FutureWarning)
             with torch.cuda.amp.autocast(enabled=False):
-                corresps = model._downstream_head(1, cnn_feats1, cnn_feats2, shape1, shape2)
+                corresps = model._downstream_head(1, cnn_feats1 + [feat16_1], cnn_feats2 + [feat16_2], shape1, shape2)
         return corresps
 
     # decoder 1-2

@@ -25,7 +25,7 @@ import torch
 import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
 torch.backends.cuda.matmul.allow_tf32 = True  # for gpu >= Ampere and pytorch >= 1.12
-from spider.inference import loss_of_one_batch
+from spider.inference import loss_of_one_batch, loss_of_one_batch_fm
 from spider.losses import *
 
 import spider.utils.path_to_dust3r #noqa
@@ -38,7 +38,7 @@ from croco.utils.misc import NativeScalerWithGradNormCount as NativeScaler  # no
 import pdb
 
 def get_args_parser():
-    parser = argparse.ArgumentParser('SPIDER training', add_help=False)
+    parser = argparse.ArgumentParser('SPIDER_FM training', add_help=False)
     # model and criterion
     parser.add_argument('--model', default="SPIDER(patch_embed_cls='ManyAR_PatchEmbed')",
                         type=str, help="string containing the model to build")
@@ -152,7 +152,8 @@ def train(args):
 
     print('Number of parameters: ', sum(p.numel() for p in model.parameters()))
     print('trainable parameters:', sum([p.numel() for n,p in model.named_parameters() if p.requires_grad]))
-    print('trainable head parameters:', sum([p.numel() for n,p in model.downstream_head.named_parameters() if p.requires_grad]))
+    print('trainable head1 parameters:', sum([p.numel() for n,p in model.downstream_head1.named_parameters() if p.requires_grad]))
+    print('trainable head2 parameters:', sum([p.numel() for n,p in model.downstream_head2.named_parameters() if p.requires_grad]))
 
 
     if args.distributed:
@@ -161,13 +162,13 @@ def train(args):
         model_without_ddp = model.module
 
     # following timm: set wd as 0 for bias and norm layers
-    # param_groups = misc.get_parameter_groups(model_without_ddp, args.weight_decay)
-    # optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
-    param_groups = [
-        {"params": model_without_ddp.cnn.parameters(), "lr": 32 * 5e-6 / 8},
-        {"params": model_without_ddp.downstream_head.parameters(), "lr": 32 * 1e-4 / 8},
-    ]
-    optimizer = torch.optim.AdamW(param_groups, weight_decay=0.01)
+    param_groups = misc.get_parameter_groups(model_without_ddp, args.weight_decay)
+    optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
+    # param_groups = [
+    #     {"params": model_without_ddp.cnn.parameters(), "lr": 32 * 5e-6 / 8},
+    #     {"params": model_without_ddp.downstream_head.parameters(), "lr": 32 * 1e-4 / 8},
+    # ]
+    # optimizer = torch.optim.AdamW(param_groups, weight_decay=0.01)
     print(optimizer)
     loss_scaler = NativeScaler()
 
@@ -303,10 +304,9 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         # we use a per iteration (instead of per epoch) lr scheduler
         if data_iter_step % accum_iter == 0:
-            misc.adjust_learning_rate_spider(optimizer, epoch_f, args)
-        if batch is None:
-            continue
-        loss_tuple = loss_of_one_batch(batch, model, criterion, device,
+            misc.adjust_learning_rate(optimizer, epoch_f, args)
+
+        loss_tuple = loss_of_one_batch_fm(batch, model, criterion, device,
                                        symmetrize_batch=True,
                                        use_amp=bool(args.amp), ret='loss')
         loss, loss_details = loss_tuple  # criterion returns two values
@@ -369,9 +369,7 @@ def test_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         data_loader.sampler.set_epoch(epoch)
 
     for _, batch in enumerate(metric_logger.log_every(data_loader, args.print_freq, header)):
-        if batch is None:
-            continue
-        loss_tuple = loss_of_one_batch(batch, model, criterion, device,
+        loss_tuple = loss_of_one_batch_fm(batch, model, criterion, device,
                                        symmetrize_batch=True,
                                        use_amp=bool(args.amp), ret='loss')
         loss_value, loss_details = loss_tuple  # criterion returns two values

@@ -74,32 +74,53 @@ def symmetric_inference_upsample(model, img1_coarse, img2_coarse, img1, img2, de
     img1 = img1['img'].to(device, non_blocking=True)
     img2 = img2['img'].to(device, non_blocking=True)
     # compute encoder only once
-    feat1, feat2, pos1, pos2, cnn_feats1, cnn_feats2 = model._encode_image_pairs(img1, img2, shape1, shape2)
+    cnn_feats1, cnn_feats2 = model._encode_image_pairs_upsample(img1, img2, shape1, shape2)
     
-    def decoder(feat1, feat2, pos1, pos2, shape1, shape2, cnn_feats1, cnn_feats2, finest_corresps=None):
-        dec1, dec2 = model._decoder(feat1, pos1, feat2, pos2)
-        enc_output1, dec_output1 = dec1[0], dec1[-1]
-        enc_output2, dec_output2 = dec2[0], dec2[-1]
-        feat16_1 = torch.cat([enc_output1, dec_output1], dim=-1)
-        feat16_2 = torch.cat([enc_output2, dec_output2], dim=-1)
+    def decoder(shape1, shape2, cnn_feats1, cnn_feats2, finest_corresps=None):
         # cnn_feats1.append(feat16_1)
         # cnn_feats2.append(feat16_2)
         import warnings
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=FutureWarning)
             with torch.cuda.amp.autocast(enabled=False):
-                corresps = model._downstream_head(1, cnn_feats1 + [feat16_1], cnn_feats2 + [feat16_2], shape1, shape2, upsample=True, finest_corresps=finest_corresps)
+                corresps = model._downstream_head(1, cnn_feats1, cnn_feats2, shape1, shape2, upsample=True, finest_corresps=finest_corresps)
         return corresps
 
     # decoder 1-2
-    corresps12 = decoder(feat1, feat2, pos1, pos2, shape1, shape2, cnn_feats1, cnn_feats2, finest_corresps=low_corresps12[1])
+    corresps12 = decoder(shape1, shape2, cnn_feats1, cnn_feats2, finest_corresps=low_corresps12[1])
     # decoder 2-1
-    corresps21 = decoder(feat2, feat1, pos2, pos1, shape2, shape1, cnn_feats2, cnn_feats1, finest_corresps=low_corresps21[1])
-    torch.cuda.empty_cache()
-    time.sleep(0.2)
+    corresps21 = decoder(shape2, shape1, cnn_feats2, cnn_feats1, finest_corresps=low_corresps21[1])
+    # torch.cuda.empty_cache()
+    # time.sleep(0.2)
     # time.sleep(0.01)
 
     return (low_corresps12, corresps12, low_corresps21, corresps21)
+
+def loss_of_one_batch_fm(batch, model, criterion, device, symmetrize_batch=False, use_amp=False, ret=None):
+    view1, view2 = batch
+    ignore_keys = set(['depthmap', 'dataset', 'label', 'instance', 'idx', 'true_shape', 'rng'])
+    for view in batch:
+        for name in view.keys():  # pseudo_focal
+            if name in ignore_keys:
+                continue
+            view[name] = view[name].to(device, non_blocking=True)
+
+    if symmetrize_batch:
+        view1, view2 = make_batch_symmetric(batch)
+
+    import warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=FutureWarning)
+        with torch.cuda.amp.autocast(enabled=bool(use_amp)):
+            pred1, pred2 = model(view1, view2)
+
+            # loss is supposed to be symmetric
+            with torch.cuda.amp.autocast(enabled=False):
+                loss = criterion(view1, view2, pred1, pred2) if criterion is not None else None
+    result = dict(view1=view1, view2=view2, pred1=pred1, pred2=pred2, loss=loss)
+    return result[ret] if ret else result
+
+
 
 def loss_of_one_batch(batch, model, criterion, device, symmetrize_batch=False, use_amp=False, ret=None):
     view1, view2 = batch

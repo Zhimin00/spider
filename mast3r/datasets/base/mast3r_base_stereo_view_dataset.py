@@ -197,7 +197,10 @@ class MASt3RBaseStereoViewDataset(BaseStereoViewDataset):
         # over-loaded code
         resolution = self._resolutions[ar_idx]  # DO NOT CHANGE THIS (compatible with BatchedRandomSampler)
         views = self._get_views(idx, resolution, self._rng)
-        assert len(views) == self.num_views
+        # assert len(views) == self.num_views
+        if len(views) < self.num_views:
+            print(f"Not enough valid views found for idx={idx}, only got {len(views)}.")
+            return None
 
         for v, view in enumerate(views):
             assert 'pts3d' not in view, f"pts3d should not be there, they will be computed afterwards based on intrinsics+depthmap for view {view_name(view)}"

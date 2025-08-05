@@ -21,7 +21,7 @@ from models.blocks import Mlp
 
 import os
 import torchvision.models as tvm
-from spider.utils.misc import interleave_list, transpose_to_landscape_warp
+from spider.utils.misc import interleave_list, transpose_to_landscape_warp, transpose_to_landscape_fm
 from spider.heads import head_factory
 from spider.blocks import BlockInject, Block_embed
 import pdb
@@ -204,6 +204,40 @@ class SPIDER (CroCoNet):
 
         return (shape1, shape2), (feat1, feat2), (pos1, pos2), (cnn_feats1, cnn_feats2)
 
+    def _encode_image_upsample(self, image, true_shape):
+        cnn_feats = self.cnn_embed(image, true_shape=true_shape)
+        return cnn_feats
+
+    def _encode_image_pairs_upsample(self, img1, img2, true_shape1, true_shape2):
+        if img1.shape[-2:] == img2.shape[-2:]:
+            cnn_feats = self._encode_image_upsample(torch.cat((img1, img2), dim=0),
+                                             torch.cat((true_shape1, true_shape2), dim=0))
+            cnn_feats, cnn_feats2 = zip(*[feat.chunk(2, dim=0) for feat in cnn_feats])
+            cnn_feats = list(cnn_feats)
+            cnn_feats2 = list(cnn_feats2)
+        else:
+            cnn_feats = self._encode_image_upsample(img1, true_shape1)
+            cnn_feats2 = self._encode_image_upsample(img2, true_shape2)
+        return cnn_feats, cnn_feats2
+    
+    def _encode_symmetrized_upsample(self, view1, view2):
+        img1 = view1['img']
+        img2 = view2['img']
+        B = img1.shape[0]
+        # Recover true_shape when available, otherwise assume that the img shape is the true one
+        shape1 = view1.get('true_shape', torch.tensor(img1.shape[-2:])[None].repeat(B, 1))
+        shape2 = view2.get('true_shape', torch.tensor(img2.shape[-2:])[None].repeat(B, 1))
+        # warning! maybe the images have different portrait/landscape orientations
+
+        if is_symmetrized(view1, view2):
+            # computing half of forward pass!'
+            cnn_feats1, cnn_feats2 = self._encode_image_pairs_upsample(img1[::2], img2[::2], shape1[::2], shape2[::2])
+            cnn_feats1, cnn_feats2 = interleave_list(cnn_feats1, cnn_feats2)
+        else:
+            cnn_feats1, cnn_feats2 = self._encode_image_pairs_upsample(img1, img2, shape1, shape2)
+
+        return (shape1, shape2), (cnn_feats1, cnn_feats2)
+    
     def _decoder(self, f1, pos1, f2, pos2):
         final_output = [(f1, f2)]  # before projection
 
@@ -252,6 +286,232 @@ class SPIDER (CroCoNet):
     
     def match(self, view1, view2, finest_corresps=None):
         # encode the two images --> B,S,D
+        assert finest_corresps is not None
+        (shape1, shape2), (cnn_feats1, cnn_feats2) = self._encode_symmetrized_upsample(view1, view2)
+
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning)
+            with torch.cuda.amp.autocast(enabled=False):
+                corresps = self._downstream_head(1, cnn_feats1, cnn_feats2, shape1, shape2, upsample=True, finest_corresps=finest_corresps)
+        return corresps
+
+
+class SPIDER_FM (CroCoNet):
+    """ Two siamese encoders, followed by two decoders.
+    The goal is to output warp directly
+    """
+
+    def __init__(self,
+                 head_type='fm',
+                 freeze='backbone',
+                 patch_embed_cls='PatchEmbedDust3R',  # PatchEmbedDust3R or ManyAR_PatchEmbed
+                 vgg_pretrained = True,
+                 landscape_only = True,
+                 local_feat_dim = 24,
+                 desc_mode=('norm'),
+                 desc_conf_mode=('exp', 0, inf),
+                 **croco_kwargs):
+        self.desc_conf_mode = desc_conf_mode
+        self.desc_mode = desc_mode
+        self.local_feat_dim = local_feat_dim
+        self.patch_embed_cls = patch_embed_cls
+        self.croco_args = fill_default_args(croco_kwargs, super().__init__)
+        super().__init__(**croco_kwargs)
+
+        # dust3r specific initialization
+        self.dec_blocks2 = deepcopy(self.dec_blocks)
+        self.set_downstream_head(head_type, landscape_only, **croco_kwargs)
+        self.cnn = VGG19_all(pretrained=vgg_pretrained)
+        self.cnn_feature_dims = [64, 128, 256, 512]
+        self.set_freeze(freeze)
+        self.landscape_only = landscape_only
+        
+        
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, **kw):
+        if os.path.isfile(pretrained_model_name_or_path):
+            return load_model(pretrained_model_name_or_path, device='cpu')
+        else:
+            try:
+                model = super(SPIDER, cls).from_pretrained(pretrained_model_name_or_path, **kw)
+            except TypeError as e:
+                raise Exception(f'tried to load {pretrained_model_name_or_path} from huggingface, but failed')
+            return model
+
+    def _set_patch_embed(self, img_size=224, patch_size=16, enc_embed_dim=768):
+        self.patch_size = patch_size
+        self.patch_embed = get_patch_embed(self.patch_embed_cls, img_size, patch_size, enc_embed_dim)
+
+    def load_state_dict(self, ckpt, **kw):
+        # duplicate all weights for the second decoder if not present
+        new_ckpt = dict(ckpt)
+        if not any(k.startswith('dec_blocks2') for k in ckpt):
+            for key, value in ckpt.items():
+                if key.startswith('dec_blocks'):
+                    new_ckpt[key.replace('dec_blocks', 'dec_blocks2')] = value
+        return super().load_state_dict(new_ckpt, **kw)
+
+    def set_freeze(self, freeze):  # this is for use by downstream models
+        self.freeze = freeze
+        to_be_frozen = {
+            'none': [],
+            'mask': [self.mask_token],
+            'encoder': [self.mask_token, self.patch_embed, self.enc_blocks],
+            'backbone': [self.mask_token, self.enc_norm, self.decoder_embed, self.dec_norm, self.patch_embed.norm, self.patch_embed.proj, self.enc_blocks, self.dec_blocks, self.dec_blocks2],
+        }
+        freeze_all_params(to_be_frozen[freeze])
+
+    def _set_prediction_head(self, *args, **kwargs):
+        """ No prediction head """
+        return
+
+    def set_downstream_head(self, head_type, landscape_only, patch_size, img_size,
+                            **kw):
+        assert img_size[0] % patch_size == 0 and img_size[1] % patch_size == 0, \
+            f'{img_size=} must be multiple of {patch_size=}'
+        self.head_type = head_type
+        # allocate heads
+        self.downstream_head1 = head_factory(head_type,  self)
+        self.downstream_head2 = head_factory(head_type,  self)
+        # magic wrapper
+        self.head1 = transpose_to_landscape_fm(self.downstream_head1, activate=landscape_only)
+        self.head2 = transpose_to_landscape_fm(self.downstream_head2, activate=landscape_only)
+
+
+    def cnn_embed(self, img, true_shape):
+        B, C, H, W = img.shape
+        if self.landscape_only:
+            assert W >= H, f'img should be in landscape mode, but got {W=} {H=}'
+            assert true_shape.shape == (B, 2), f"true_shape has the wrong shape={true_shape.shape}"
+            height, width = true_shape.T
+            is_landscape = (width >= height)
+            is_portrait = ~is_landscape
+            ns = [W * H, (W//2) * (H//2), (W//4) * (H//4), (W//8) * (H//8)]
+            # allocate result
+            feats = [img.new_zeros((B, ns[idx], self.cnn_feature_dims[idx])) for idx in range(len(self.cnn_feature_dims))]
+            feat1, feat2, feat4, feat8 = feats
+            
+            feat1[is_landscape], feat2[is_landscape], feat4[is_landscape], feat8[is_landscape] = self.cnn(img[is_landscape])
+            feat1[is_portrait], feat2[is_portrait], feat4[is_portrait], feat8[is_portrait] = self.cnn(img[is_portrait].swapaxes(-1, -2))
+            cnn_feats = [feat1, feat2, feat4, feat8]
+            return cnn_feats
+        else:
+            cnn_feats = self.cnn(img)
+            return cnn_feats
+
+    def _encode_image(self, image, true_shape):
+        # embed the image into patches  (x has size B x Npatches x C)
+        x, pos = self.patch_embed(image, true_shape=true_shape)
+        cnn_feats = self.cnn_embed(image, true_shape=true_shape)
+        # add positional embedding without cls token
+        assert self.enc_pos_embed is None
+
+        # now apply the transformer encoder and normalization
+        for blk in self.enc_blocks:
+            x = blk(x, pos)
+
+        x = self.enc_norm(x)
+        return x, pos, cnn_feats
+
+    def _encode_image_pairs(self, img1, img2, true_shape1, true_shape2):
+        if img1.shape[-2:] == img2.shape[-2:]:
+            out, pos, cnn_feats = self._encode_image(torch.cat((img1, img2), dim=0),
+                                             torch.cat((true_shape1, true_shape2), dim=0))
+            out, out2 = out.chunk(2, dim=0)
+            pos, pos2 = pos.chunk(2, dim=0)
+            cnn_feats, cnn_feats2 = zip(*[feat.chunk(2, dim=0) for feat in cnn_feats])
+            cnn_feats = list(cnn_feats)
+            cnn_feats2 = list(cnn_feats2)
+        else:
+            out, pos, cnn_feats = self._encode_image(img1, true_shape1)
+            out2, pos2, cnn_feats2 = self._encode_image(img2, true_shape2)
+        return out, out2, pos, pos2, cnn_feats, cnn_feats2
+
+    def _encode_symmetrized(self, view1, view2):
+        img1 = view1['img']
+        img2 = view2['img']
+        B = img1.shape[0]
+        # Recover true_shape when available, otherwise assume that the img shape is the true one
+        shape1 = view1.get('true_shape', torch.tensor(img1.shape[-2:])[None].repeat(B, 1))
+        shape2 = view2.get('true_shape', torch.tensor(img2.shape[-2:])[None].repeat(B, 1))
+        # warning! maybe the images have different portrait/landscape orientations
+
+        if is_symmetrized(view1, view2):
+            # computing half of forward pass!'
+            feat1, feat2, pos1, pos2, cnn_feats1, cnn_feats2 = self._encode_image_pairs(img1[::2], img2[::2], shape1[::2], shape2[::2])
+            feat1, feat2 = interleave(feat1, feat2)
+            pos1, pos2 = interleave(pos1, pos2)
+            cnn_feats1, cnn_feats2 = interleave_list(cnn_feats1, cnn_feats2)
+        else:
+            feat1, feat2, pos1, pos2, cnn_feats1, cnn_feats2 = self._encode_image_pairs(img1, img2, shape1, shape2)
+
+        return (shape1, shape2), (feat1, feat2), (pos1, pos2), (cnn_feats1, cnn_feats2)
+
+    def _encode_image_upsample(self, image, true_shape):
+        cnn_feats = self.cnn_embed(image, true_shape=true_shape)
+        return cnn_feats
+
+    def _encode_image_pairs_upsample(self, img1, img2, true_shape1, true_shape2):
+        if img1.shape[-2:] == img2.shape[-2:]:
+            cnn_feats = self._encode_image_upsample(torch.cat((img1, img2), dim=0),
+                                             torch.cat((true_shape1, true_shape2), dim=0))
+            cnn_feats, cnn_feats2 = zip(*[feat.chunk(2, dim=0) for feat in cnn_feats])
+            cnn_feats = list(cnn_feats)
+            cnn_feats2 = list(cnn_feats2)
+        else:
+            cnn_feats = self._encode_image_upsample(img1, true_shape1)
+            cnn_feats2 = self._encode_image_upsample(img2, true_shape2)
+        return cnn_feats, cnn_feats2
+    
+    def _encode_symmetrized_upsample(self, view1, view2):
+        img1 = view1['img']
+        img2 = view2['img']
+        B = img1.shape[0]
+        # Recover true_shape when available, otherwise assume that the img shape is the true one
+        shape1 = view1.get('true_shape', torch.tensor(img1.shape[-2:])[None].repeat(B, 1))
+        shape2 = view2.get('true_shape', torch.tensor(img2.shape[-2:])[None].repeat(B, 1))
+        # warning! maybe the images have different portrait/landscape orientations
+
+        if is_symmetrized(view1, view2):
+            # computing half of forward pass!'
+            cnn_feats1, cnn_feats2 = self._encode_image_pairs_upsample(img1[::2], img2[::2], shape1[::2], shape2[::2])
+            cnn_feats1, cnn_feats2 = interleave_list(cnn_feats1, cnn_feats2)
+        else:
+            cnn_feats1, cnn_feats2 = self._encode_image_pairs_upsample(img1, img2, shape1, shape2)
+
+        return (shape1, shape2), (cnn_feats1, cnn_feats2)
+    
+    def _decoder(self, f1, pos1, f2, pos2):
+        final_output = [(f1, f2)]  # before projection
+
+        # project to decoder dim
+        f1 = self.decoder_embed(f1)
+        f2 = self.decoder_embed(f2)
+
+        final_output.append((f1, f2))
+        for blk1, blk2 in zip(self.dec_blocks, self.dec_blocks2):
+            # img1 side
+            f1, _ = blk1(*final_output[-1][::+1], pos1, pos2)
+            # img2 side
+            f2, _ = blk2(*final_output[-1][::-1], pos2, pos1)
+            # store the result
+            final_output.append((f1, f2))
+
+        # normalize last output
+        del final_output[1]  # duplicate with final_output[0]
+        final_output[-1] = tuple(map(self.dec_norm, final_output[-1]))
+        return zip(*final_output)
+
+    def _downstream_head(self, head_num, cnn_feats, shape, upsample=False, desc = None, certainty = None):
+        B, S, D = cnn_feats[-1].shape
+        # img_shape = tuple(map(int, img_shape))
+        head = getattr(self, f'head{head_num}')
+        return head(cnn_feats, shape, upsample=upsample, desc=desc, certainty=certainty)
+
+    def forward(self, view1, view2):
+        # encode the two images --> B,S,D
         (shape1, shape2), (feat1, feat2), (pos1, pos2), (cnn_feats1, cnn_feats2) = self._encode_symmetrized(view1, view2)
 
         # combine all ref images into object-centric representation
@@ -266,8 +526,25 @@ class SPIDER (CroCoNet):
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=FutureWarning)
             with torch.cuda.amp.autocast(enabled=False):
-                corresps = self._downstream_head(1, cnn_feats1, cnn_feats2, shape1, shape2, upsample=True, finest_corresps=finest_corresps)
-        return corresps
+                res1 = self._downstream_head(1, cnn_feats1, shape1, upsample = False, desc = None, certainty = None)
+                res2 = self._downstream_head(2, cnn_feats2, shape2, upsample = False, desc = None, certainty = None)
+
+        return res1, res2
+    
+    def match(self, view1, view2, desc1=None, certainty1=None, desc2=None, certainty2=None):
+        # encode the two images --> B,S,D
+        assert desc1 is not None and certainty1 is not None
+        assert desc2 is not None and certainty2 is not None
+        
+        (shape1, shape2), (cnn_feats1, cnn_feats2) = self._encode_symmetrized_upsample(view1, view2)
+
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning)
+            with torch.cuda.amp.autocast(enabled=False):
+                res1 = self._downstream_head(1, cnn_feats1, shape1, upsample=True, desc = desc1, certainty = certainty1)
+                res2 = self._downstream_head(2, cnn_feats2, shape2, upsample=True, desc = desc2, certainty = certainty2)
+        return res1, res2
     
 class RelPoseEmbedGenerator(nn.Module):
     def __init__(self, embed_dim):

@@ -97,7 +97,7 @@ def fine_matching(query_views, map_views, model, device, max_batch_size=48):
     return matches_im_query, matches_im_map, matches_confs
 
 
-def coarse_to_fine(h1, w1, h2, w2, imgs_large, kpts1, kpts2, model, device):
+def coarse_to_fine(h1, w1, h2, w2, imgs_large, kpts1, kpts2, mconf, model, device):
     crops1, crops2 = [], []
     to_orig1, to_orig2 = [], []
     query_resolution = get_HW_resolution(h1, w1, maxdim=512, patchsize=16)
@@ -116,7 +116,7 @@ def coarse_to_fine(h1, w1, h2, w2, imgs_large, kpts1, kpts2, model, device):
         to_orig1.append(trf1)
         to_orig2.append(trf2)
     if len(crops1) == 0 or len(crops2) == 0:
-        return kpts1, kpts2
+        return kpts1, kpts2, mconf
     else:
         crops1, crops2 = torch.stack(crops1), torch.stack(crops2)
         if len(crops1.shape) == 3:
@@ -134,4 +134,4 @@ def coarse_to_fine(h1, w1, h2, w2, imgs_large, kpts1, kpts2, model, device):
 
         # Inference and Matching
         kpts1, kpts2, mconf = fine_matching(query_crop_view, map_crop_view, model, device)
-    return kpts1, kpts2
+    return kpts1, kpts2, mconf

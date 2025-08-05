@@ -86,7 +86,7 @@ def mast3r_match(model, device, im_A_path, im_B_path, K1_ori, K2_ori, coarse_siz
         )
     )
                                             
-    kpts1, kpts2 = coarse_to_fine(h1, w1, h2, w2, imgs_large, kpts1, kpts2, model, device)
+    kpts1, kpts2, mconf = coarse_to_fine(h1, w1, h2, w2, imgs_large, kpts1, kpts2, model, device)
     kpts1, kpts2 = kpts1.cpu().numpy(), kpts2.cpu().numpy()
     K1, K2 = new_intrinsics
     return kpts1, kpts2, K1, K2

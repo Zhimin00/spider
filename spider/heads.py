@@ -5,6 +5,120 @@ from spider.roma import TransformerDecoder, Block, MemEffAttention, ConvRefiner,
 from einops import rearrange
 import pdb
 
+inf = float('inf')
+
+class MultiScaleFM(nn.Module):
+    def __init__(self, desc_dim, desc_mode, desc_conf_mode, patch_size):
+        super().__init__()
+        self.desc_dim = desc_dim
+        self.desc_mode = desc_mode
+        self.desc_conf_mode = desc_conf_mode
+        self.patch_size = patch_size
+        self.proj16 = nn.Sequential(nn.Conv2d(1024+768, 512, 1, 1), nn.BatchNorm2d(512))
+        self.proj8 = nn.Sequential(nn.Conv2d(512, 512, 1, 1), nn.BatchNorm2d(512))
+        self.proj4 = nn.Sequential(nn.Conv2d(256, 256, 1, 1), nn.BatchNorm2d(256))
+        self.proj2 = nn.Sequential(nn.Conv2d(128, 64, 1, 1), nn.BatchNorm2d(64))
+        self.proj1 = nn.Sequential(nn.Conv2d(64, 32, 1, 1), nn.BatchNorm2d(32))
+        
+        
+        self.init_desc = self._make_block(512, 512, desc_dim + 1)
+        self.refine8 = self._make_block(512 + desc_dim + 1, 512 + desc_dim + 1, desc_dim + 1)
+        self.refine4 = self._make_block(256 + desc_dim + 1, 256 + desc_dim + 1, desc_dim + 1)
+        self.refine2 = self._make_block(64 + desc_dim + 1, 64 + desc_dim + 1, desc_dim + 1)
+        self.refine1 = self._make_block(32 + desc_dim + 1, 32 + desc_dim + 1, desc_dim + 1)
+
+    def _make_block(self, in_dim, hidden_dim, out_dim, bn_momentum=0.01):
+        return nn.Sequential(
+            nn.Conv2d(in_dim, hidden_dim, 5, padding=2, groups=in_dim, bias=True),
+            
+            nn.Conv2d(hidden_dim, hidden_dim, 5, padding=2, groups=hidden_dim, bias=True),
+            nn.BatchNorm2d(hidden_dim, momentum = bn_momentum),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_dim, hidden_dim, 1, 1, 0),
+
+            nn.Conv2d(hidden_dim, out_dim, 1, 1, 0),
+        )
+
+    def forward(self, cnn_feats, true_shape, upsample = False, desc = None, certainty = None):  # dict: {"16": f16, "8": f8, "4": f4, "2": f2, "1": f1]
+        H1, W1 = true_shape[-2:]
+        if upsample:
+            scales = [1, 2, 4, 8]
+        else:
+            scales = [1, 2, 4, 8, 16]
+        N_Hs = [H1 // s if s != 16 else H1 // self.patch_size for s in scales]
+        N_Ws = [W1 // s if s != 16 else W1 // self.patch_size for s in scales]
+        feat_pyramid = {}
+        for i, s in enumerate(scales):
+            nh, nw = N_Hs[i], N_Ws[i]
+            feat = rearrange(cnn_feats[i], 'b (nh nw) c -> b nh nw c', nh=nh, nw=nw)
+            feat_pyramid[s] = feat.permute(0, 3, 1, 2).contiguous()  ## b, c, nh, nw
+            del feat
+
+        coarsest_scale = scales[-1]
+        sizes = {scale: feat_pyramid[scale].shape[-2:] for scale in feat_pyramid}
+
+        
+        if upsample:
+            d = torch.cat([desc, certainty], dim=1)
+        else:
+            d = self.init_desc(self.proj16(feat_pyramid[16]))
+            # desc, certainty = d[:, :-1], d[:, -1:] # [B, D, H//16, W//16], [B, 1, H//16, W//16]
+        d = F.interpolate(
+                d,
+                size=(N_Hs[3], N_Ws[3]),
+                mode="bilinear",
+            ) # [B, D+1, H//8, W//8]
+            
+        d = self.refine8(torch.cat([d, self.proj8(feat_pyramid[8])], dim=1)) + d # [B, D+1, H//8, W//8]
+        d =  F.interpolate(
+                    d,
+                    size=(N_Hs[2], N_Ws[2]),
+                    mode="bilinear",
+                )  # [B, D+1, H//4, W//4]
+        
+        d = self.refine4(torch.cat([d, self.proj4(feat_pyramid[4])], dim=1)) + d # [B, D+1, H//4, W//4]
+        d =  F.interpolate(
+                    d,
+                    size=(N_Hs[1], N_Ws[1]),
+                    mode="bilinear",
+                )  # [B, D+1, H//2, W//2]
+        
+        d = self.refine2(torch.cat([d, self.proj2(feat_pyramid[2])], dim=1)) + d # [B, D+1, H//2, W//2]
+        d =  F.interpolate(
+                    d,
+                    size=(N_Hs[0], N_Ws[0]),
+                    mode="bilinear",
+                )  # [B, D+1, H//1, W//1]
+        d = self.refine1(torch.cat([d, self.proj1(feat_pyramid[1])], dim=1)) + d # [B, D+1, H, W]
+
+        desc, desc_conf = d[:, :-1], d[:, -1:]
+        desc = desc.permute(0, 2, 3, 1)
+        desc_conf = desc_conf.permute(0, 2, 3, 1)
+
+        ## postprocess
+        desc = reg_desc(desc, mode = self.desc_mode)
+        desc_conf = reg_dense_conf(desc_conf, mode = self.desc_conf_mode)
+        return {'desc': desc, 'desc_conf': desc_conf}  # [B, H, W, D], [B, H, W, 1]
+
+
+def reg_dense_conf(x, mode= ('exp', 0, inf)):
+    """
+    extract confidence from prediction head output
+    """
+    mode, vmin, vmax = mode
+    if mode == 'exp':
+        return vmin + x.exp().clip(max=vmax-vmin)
+    if mode == 'sigmoid':
+        return (vmax - vmin) * torch.sigmoid(x) + vmin
+    raise ValueError(f'bad {mode=}')
+
+def reg_desc(desc, mode):
+    if 'norm' in mode:
+        desc = desc / desc.norm(dim=-1, keepdim=True)
+    else:
+        raise ValueError(f"Unknown desc mode {mode}")
+    return desc
+
 class WarpHead(nn.Module):
     def __init__(
             self,
@@ -18,18 +132,23 @@ class WarpHead(nn.Module):
     def forward(self, cnn_feats1, cnn_feats2, true_shape1, true_shape2, upsample = False, scale_factor = 1, finest_corresps=None):
         feat1_pyramid = {}
         H1, W1 = true_shape1[-2:]
-        N_Hs1 = [H1 // 1, H1 // 2, H1 // 4, H1 // 8, H1 // self.patch_size]
-        N_Ws1 = [W1 // 1, W1 // 2, W1 // 4, W1 // 8, W1 // self.patch_size]
-        for i, s in enumerate([1, 2, 4, 8, 16]):
+        if upsample:
+            scales = [1, 2, 4, 8]
+        else:
+            scales = [1, 2, 4, 8, 16]
+        N_Hs1 = [H1 // s if s != 16 else H1 // self.patch_size for s in scales]
+        N_Ws1 = [W1 // s if s != 16 else W1 // self.patch_size for s in scales]
+        
+        for i, s in enumerate(scales):
             nh, nw = N_Hs1[i], N_Ws1[i]
             feat = rearrange(cnn_feats1[i], 'b (nh nw) c -> b nh nw c', nh=nh, nw=nw)
             feat1_pyramid[s] = feat.permute(0, 3, 1, 2).contiguous()  ## b, c, nh, nw
             del feat
         feat2_pyramid = {}
         H2, W2 = true_shape2[-2:]
-        N_Hs2 = [H2 // 1, H2 // 2, H2 // 4, H2 // 8, H2 // self.patch_size]
-        N_Ws2 = [W2 // 1, W2 // 2, W2 // 4, W2 // 8, W2 // self.patch_size]
-        for i, s in enumerate([1, 2, 4, 8, 16]):
+        N_Hs2 = [H2 // s if s != 16 else H2 // self.patch_size for s in scales]
+        N_Ws2 = [W2 // s if s != 16 else W2 // self.patch_size for s in scales]
+        for i, s in enumerate(scales):
             nh, nw = N_Hs2[i], N_Ws2[i]
             feat = rearrange(cnn_feats2[i], 'b (nh nw) c -> b nh nw c', nh=nh, nw=nw)
             feat2_pyramid[s] = feat.permute(0, 3, 1, 2).contiguous()
@@ -43,15 +162,13 @@ class WarpHead(nn.Module):
 
 ## warp or linear
 def head_factory(head_type, net):
-    if head_type == 'warp':
-        patch_size = net.patch_embed.patch_size
-        if isinstance(patch_size, tuple):
-            assert len(patch_size) == 2 and isinstance(patch_size[0], int) and isinstance(
-                patch_size[1], int), "What is your patchsize format? Expected a single int or a tuple of two ints."
-            assert patch_size[0] == patch_size[1], "Error, non square patches not managed"
-            patch_size = patch_size[0]
-       
-
+    patch_size = net.patch_embed.patch_size
+    if isinstance(patch_size, tuple):
+        assert len(patch_size) == 2 and isinstance(patch_size[0], int) and isinstance(
+            patch_size[1], int), "What is your patchsize format? Expected a single int or a tuple of two ints."
+        assert patch_size[0] == patch_size[1], "Error, non square patches not managed"
+        patch_size = patch_size[0]
+    if head_type == 'warp':     
         gp_dim = 512
         feat_dim = 512
         decoder_dim = gp_dim + feat_dim
@@ -178,6 +295,8 @@ def head_factory(head_type, net):
                         gm_warp_dropout_p = gm_warp_dropout_p)
         return WarpHead(decoder, patch_size)
     
+    elif head_type == 'fm':
+        return MultiScaleFM(net.local_feat_dim, net.desc_mode, net.desc_conf_mode, patch_size)
     else:
         raise NotImplementedError(
             f"unexpected {head_type=}")

@@ -7,13 +7,17 @@ import mast3r.utils.path_to_dust3r  # noqa
 from dust3r.datasets.arkitscenes import ARKitScenes as DUSt3R_ARKitScenes  # noqa
 from dust3r.datasets.blendedmvs import BlendedMVS as DUSt3R_BlendedMVS  # noqa
 from dust3r.datasets.co3d import Co3d as DUSt3R_Co3d  # noqa
+from dust3r.datasets.habitat import Habitat as DUSt3R_Habitat
 from dust3r.datasets.megadepth import MegaDepth as DUSt3R_MegaDepth  # noqa
+from dust3r.datasets.megadepth import Aerial_MegaDepth as DUSt3R_Aerial_MegaDepth  # noqa
+from dust3r.datasets.megadepth import MegaDepth_all as DUSt3R_MegaDepth_all
 from dust3r.datasets.scannetpp import ScanNetpp as DUSt3R_ScanNetpp  # noqa
 from dust3r.datasets.staticthings3d import StaticThings3D as DUSt3R_StaticThings3D  # noqa
 from dust3r.datasets.waymo import Waymo as DUSt3R_Waymo  # noqa
 from dust3r.datasets.wildrgbd import WildRGBD as DUSt3R_WildRGBD  # noqa
 from dust3r.datasets.utils.transforms import *
 from dust3r.datasets.base.batched_sampler import BatchedRandomSampler 
+from torch.utils.data._utils.collate import default_collate
 
 class ARKitScenes(DUSt3R_ARKitScenes, MASt3RBaseStereoViewDataset):
     def __init__(self, *args, split, ROOT, **kwargs):
@@ -33,11 +37,25 @@ class Co3d(DUSt3R_Co3d, MASt3RBaseStereoViewDataset):
         self.is_metric_scale = False
 
 
+class Habitat(DUSt3R_Habitat, MASt3RBaseStereoViewDataset):
+     def __init__(self, size, *args, ROOT, **kwargs):
+        super().__init__(size, *args, ROOT=ROOT, **kwargs)
+        self.is_metric_scale = False
+
 class MegaDepth(DUSt3R_MegaDepth, MASt3RBaseStereoViewDataset):
     def __init__(self, *args, split, ROOT, **kwargs):
         super().__init__(*args, split=split, ROOT=ROOT, **kwargs)
         self.is_metric_scale = False
 
+class MegaDepth_all(DUSt3R_MegaDepth_all, MASt3RBaseStereoViewDataset):
+    def __init__(self, *args, ROOT, min_overlap=0.0, max_overlap=1.0, max_num_pairs = 100_000, **kwargs):
+        super().__init__(*args, ROOT=ROOT, min_overlap=min_overlap, max_overlap=max_overlap, max_num_pairs = max_num_pairs, **kwargs)
+        self.is_metric_scale = False
+
+class Aerial_MegaDepth(DUSt3R_Aerial_MegaDepth, MASt3RBaseStereoViewDataset):
+    def __init__(self, *args, split, ROOT, **kwargs):
+        super().__init__(*args, split=split, ROOT=ROOT, **kwargs)
+        self.is_metric_scale = False
 
 class ScanNetpp(DUSt3R_ScanNetpp, MASt3RBaseStereoViewDataset):
     def __init__(self, *args, ROOT, **kwargs):
@@ -61,6 +79,12 @@ class WildRGBD(DUSt3R_WildRGBD, MASt3RBaseStereoViewDataset):
     def __init__(self, mask_bg=True, *args, ROOT, **kwargs):
         super().__init__(mask_bg, *args, ROOT=ROOT, **kwargs)
         self.is_metric_scale = True
+
+def safe_collate_fn(batch):
+    batch = [b for b in batch if b is not None]
+    if len(batch) == 0:
+        return None
+    return default_collate(batch)
 
 def get_data_loader(dataset, batch_size, num_workers=8, shuffle=True, drop_last=True, pin_mem=True):
     import torch
@@ -94,6 +118,7 @@ def get_data_loader(dataset, batch_size, num_workers=8, shuffle=True, drop_last=
         num_workers=num_workers,
         pin_memory=pin_mem,
         drop_last=drop_last,
+        collate_fn=safe_collate_fn,
     )
 
     return data_loader

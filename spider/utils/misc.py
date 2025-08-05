@@ -113,3 +113,48 @@ def transpose_to_landscape_warp(head, activate=True):
         return result
 
     return wrapper_yes if activate else wrapper_no
+
+
+def transpose_to_landscape_fm(head, activate=True):
+    """ Predict in the correct aspect-ratio,
+        then transpose the result in landscape 
+        and stack everything back together.
+    """
+    def wrapper_no(cnn_feats, true_shape, upsample=False, desc=None, certainty=None):
+        B = len(true_shape)
+        assert true_shape[0:1].allclose(true_shape), 'true_shape must be all identical'
+        H, W = true_shape[0].cpu().tolist()
+        res = head(cnn_feats, (H, W), upsample=upsample, desc=desc, certainty=certainty)
+        return res
+
+    def wrapper_yes(cnn_feats, true_shape, upsample=False, desc=None, certainty=None):
+        B = len(true_shape)
+        # by definition, the batch is in landscape mode so W >= H
+        H, W = int(true_shape.min()), int(true_shape.max())
+
+        height, width = true_shape.T
+        is_landscape = (width >= height)
+        is_portrait = ~is_landscape
+
+        # true_shape = true_shape.cpu()
+        if is_landscape.all():
+            return head(cnn_feats, (H, W), upsample=upsample, desc=desc, certainty=certainty)
+        if is_portrait.all():
+            return transposed(head(cnn_feats, (W, H), upsample=upsample, desc=desc, certainty=certainty))
+
+        # batch is a mix of both portraint & landscape
+        def cnnout(ar): return [cnn_feat[ar] for cnn_feat in cnn_feats]
+        l_result = head(cnnout(is_landscape), (H, W), upsample=upsample, desc=desc, certainty=certainty)
+        p_result = transposed(head(cnnout(is_portrait), (W, H), upsample=upsample, desc=desc, certainty=certainty))
+
+        # allocate full result
+        result = {}
+        for k in l_result | p_result:
+            x = l_result[k].new(B, *l_result[k].shape[1:])
+            x[is_landscape] = l_result[k]
+            x[is_portrait] = p_result[k]
+            result[k] = x
+
+        return result
+
+    return wrapper_yes if activate else wrapper_no

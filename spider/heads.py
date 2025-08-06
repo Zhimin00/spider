@@ -48,19 +48,22 @@ class MultiScaleFM(nn.Module):
         self.refine1 = self._make_block(16 + self.desc_dim + 1, 16 + self.desc_dim + 1, self.desc_dim + 1)
     def _make_block(self, in_dim, hidden_dim, out_dim, bn_momentum=0.01):
         return nn.Sequential(
-            nn.Conv2d(in_dim, hidden_dim, 5, padding=2, groups=in_dim, bias=True),
-            
-            nn.Conv2d(hidden_dim, hidden_dim, 5, padding=2, groups=hidden_dim, bias=True),
+            nn.Conv2d(in_dim, hidden_dim, kernel_size=5, stride=1, padding=2, groups=in_dim, bias=True),
             nn.BatchNorm2d(hidden_dim, momentum = bn_momentum),
             nn.ReLU(inplace=True),
             nn.Conv2d(hidden_dim, hidden_dim, 1, 1, 0),
 
-            nn.Conv2d(hidden_dim, hidden_dim, 5, padding=2, groups=hidden_dim, bias=True),
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=5, stride=1, padding=2, groups=hidden_dim, bias=True),
             nn.BatchNorm2d(hidden_dim, momentum = bn_momentum),
             nn.ReLU(inplace=True),
             nn.Conv2d(hidden_dim, hidden_dim, 1, 1, 0),
 
-            nn.Conv2d(hidden_dim, hidden_dim, 5, padding=2, groups=hidden_dim, bias=True),
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=5, stride=1, padding=2, groups=hidden_dim, bias=True),
+            nn.BatchNorm2d(hidden_dim, momentum = bn_momentum),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_dim, hidden_dim, 1, 1, 0),
+
+            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=5, stride=1, padding=2, groups=hidden_dim, bias=True),
             nn.BatchNorm2d(hidden_dim, momentum = bn_momentum),
             nn.ReLU(inplace=True),
             nn.Conv2d(hidden_dim, hidden_dim, 1, 1, 0),

@@ -112,7 +112,6 @@ class MultiScaleFM(nn.Module):
         ## postprocess
         desc = reg_desc(desc, mode = self.desc_mode)
         desc_conf = reg_dense_conf(desc_conf, mode = self.desc_conf_mode)
-        pdb.set_trace()
         return {'desc': desc, 'desc_conf': desc_conf}  # [B, H, W, D], [B, H, W]
 
         # H1, W1 = true_shape[-2:]

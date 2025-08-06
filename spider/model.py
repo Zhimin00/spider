@@ -528,7 +528,7 @@ class SPIDER_FM (CroCoNet):
             with torch.cuda.amp.autocast(enabled=False):
                 res1 = self._downstream_head(1, cnn_feats1, shape1, upsample = False, desc = None, certainty = None)
                 res2 = self._downstream_head(2, cnn_feats2, shape2, upsample = False, desc = None, certainty = None)
-
+        
         return res1, res2
     
     def match(self, view1, view2, desc1=None, certainty1=None, desc2=None, certainty2=None):

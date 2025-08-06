@@ -392,8 +392,7 @@ class MatchingLoss (Criterion, MultiLoss):
         # Recover descs, GT corres and valid mask
         desc1, desc2 = self.get_descs(pred1, pred2)
 
-        (x1, y1), (x2, y2) = gt1['corres'].unbind(-1), gt2['corres'].unbind(-1)
-        pdb.set_trace()
+        (x1, y1), (x2, y2) = gt1['corres'].unbind(-1), gt2['corres'].unbind(-1) # b*2, 8192
         valid_matches = gt1['valid_corres']
 
         # Select descs that have GT matches

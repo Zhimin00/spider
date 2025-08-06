@@ -23,23 +23,29 @@ class MultiScaleFM(nn.Module):
         self.proj1 = nn.Sequential(nn.Conv2d(64, 32, 1, 1), nn.BatchNorm2d(16))
         
         
-        self.init_desc = Mlp(in_features=512,
-                            hidden_features=int(hidden_dim_factor * 512),
-                            out_features=(self.desc_dim + 1))
+        # self.init_desc = Mlp(in_features=512,
+        #                     hidden_features=int(hidden_dim_factor * 512),
+        #                     out_features=(self.desc_dim + 1))
 
-        self.refine8 = Mlp(in_features=512 + self.desc_dim + 1,
-                            hidden_features=int(hidden_dim_factor * (512 + self.desc_dim + 1)),
-                            out_features=(self.desc_dim + 1))
-        self.refine4 = Mlp(in_features=256 + self.desc_dim + 1,
-                            hidden_features=int(hidden_dim_factor * (256 + self.desc_dim + 1)),
-                            out_features=(self.desc_dim + 1))
-        self.refine2 = Mlp(in_features=64 + self.desc_dim + 1,
-                            hidden_features=int(hidden_dim_factor * (64 + self.desc_dim + 1)),
-                            out_features=(self.desc_dim + 1))
-        self.refine1 = Mlp(in_features=16 + self.desc_dim + 1,
-                            hidden_features=int(hidden_dim_factor * (16 + self.desc_dim + 1)),
-                            out_features=(self.desc_dim + 1))
+        # self.refine8 = Mlp(in_features=512 + self.desc_dim + 1,
+        #                     hidden_features=int(hidden_dim_factor * (512 + self.desc_dim + 1)),
+        #                     out_features=(self.desc_dim + 1))
+        # self.refine4 = Mlp(in_features=256 + self.desc_dim + 1,
+        #                     hidden_features=int(hidden_dim_factor * (256 + self.desc_dim + 1)),
+        #                     out_features=(self.desc_dim + 1))
+        # self.refine2 = Mlp(in_features=64 + self.desc_dim + 1,
+        #                     hidden_features=int(hidden_dim_factor * (64 + self.desc_dim + 1)),
+        #                     out_features=(self.desc_dim + 1))
+        # self.refine1 = Mlp(in_features=16 + self.desc_dim + 1,
+        #                     hidden_features=int(hidden_dim_factor * (16 + self.desc_dim + 1)),
+        #                     out_features=(self.desc_dim + 1))
 
+        self.init_desc = _make_block(512, 512, self.desc_dim + 1)
+
+        self.refine8 = _make_block(512 + self.desc_dim + 1, 512 + self.desc_dim + 1, self.desc_dim + 1)
+        self.refine4 = _make_block(256 + self.desc_dim + 1, 256 + self.desc_dim + 1, self.desc_dim + 1)
+        self.refine2 = _make_block(64 + self.desc_dim + 1, 64 + self.desc_dim + 1, self.desc_dim + 1)
+        self.refine1 = _make_block(16 + self.desc_dim + 1, 16 + self.desc_dim + 1, self.desc_dim + 1)
     # def _make_block(self, in_dim, hidden_dim, out_dim, bn_momentum=0.01):
     #     return nn.Sequential(
     #         nn.Conv2d(in_dim, hidden_dim, 5, padding=2, groups=in_dim, bias=True),
@@ -63,12 +69,14 @@ class MultiScaleFM(nn.Module):
         feat_pyramid = {}
         for i, s in enumerate(scales):
             nh, nw = N_Hs[i], N_Ws[i]
-            feat = rearrange(cnn_feats[i], 'b (nh nw) c -> b nh nw c', nh=nh, nw=nw)
-            feat_pyramid[s] = feat.permute(0, 3, 1, 2).contiguous()  ## b, c, nh, nw
+            feat = rearrange(cnn_feats[i], 'b (nh nw) c -> b c nh nw', nh=nh, nw=nw)
+            # feat_pyramid[s] = feat.permute(0, 3, 1, 2).contiguous()  ## b, c, nh, nw
+            feat_pyramid[s] = feat  ##  b, c, nh, nw
             del feat
 
-        coarsest_scale = scales[-1]
-        sizes = {scale: feat_pyramid[scale].shape[-2:] for scale in feat_pyramid}
+        # coarsest_scale = scales[-1]
+        
+        # sizes = {scale: feat_pyramid[scale].shape[-2:] for scale in feat_pyramid}
 
         
         if upsample:

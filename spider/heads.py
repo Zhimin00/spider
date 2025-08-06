@@ -40,12 +40,12 @@ class MultiScaleFM(nn.Module):
         #                     hidden_features=int(hidden_dim_factor * (16 + self.desc_dim + 1)),
         #                     out_features=(self.desc_dim + 1))
 
-        self.init_desc = _make_block(512, 512, self.desc_dim + 1)
+        self.init_desc = self._make_block(512, 512, self.desc_dim + 1)
 
-        self.refine8 = _make_block(512 + self.desc_dim + 1, 512 + self.desc_dim + 1, self.desc_dim + 1)
-        self.refine4 = _make_block(256 + self.desc_dim + 1, 256 + self.desc_dim + 1, self.desc_dim + 1)
-        self.refine2 = _make_block(64 + self.desc_dim + 1, 64 + self.desc_dim + 1, self.desc_dim + 1)
-        self.refine1 = _make_block(16 + self.desc_dim + 1, 16 + self.desc_dim + 1, self.desc_dim + 1)
+        self.refine8 = self._make_block(512 + self.desc_dim + 1, 512 + self.desc_dim + 1, self.desc_dim + 1)
+        self.refine4 = self._make_block(256 + self.desc_dim + 1, 256 + self.desc_dim + 1, self.desc_dim + 1)
+        self.refine2 = self._make_block(64 + self.desc_dim + 1, 64 + self.desc_dim + 1, self.desc_dim + 1)
+        self.refine1 = self._make_block(16 + self.desc_dim + 1, 16 + self.desc_dim + 1, self.desc_dim + 1)
     def _make_block(self, in_dim, hidden_dim, out_dim, bn_momentum=0.01):
         return nn.Sequential(
             nn.Conv2d(in_dim, hidden_dim, 5, padding=2, groups=in_dim, bias=True),

@@ -4,11 +4,13 @@ import torch.nn.functional as F
 from spider.roma import TransformerDecoder, Block, MemEffAttention, ConvRefiner, Decoder, CosKernel, GP
 from einops import rearrange
 import pdb
-
+import spider.utils.path_to_dust3r
+import dust3r.utils.path_to_croco  # noqa
+from models.blocks import Mlp  # noqa
 inf = float('inf')
 
 class MultiScaleFM(nn.Module):
-    def __init__(self, desc_dim, desc_mode, desc_conf_mode, patch_size):
+    def __init__(self, desc_dim, desc_mode, desc_conf_mode, patch_size, hidden_dim_factor = 4):
         super().__init__()
         self.desc_dim = desc_dim
         self.desc_mode = desc_mode
@@ -18,26 +20,37 @@ class MultiScaleFM(nn.Module):
         self.proj8 = nn.Sequential(nn.Conv2d(512, 512, 1, 1), nn.BatchNorm2d(512))
         self.proj4 = nn.Sequential(nn.Conv2d(256, 256, 1, 1), nn.BatchNorm2d(256))
         self.proj2 = nn.Sequential(nn.Conv2d(128, 64, 1, 1), nn.BatchNorm2d(64))
-        self.proj1 = nn.Sequential(nn.Conv2d(64, 32, 1, 1), nn.BatchNorm2d(32))
+        self.proj1 = nn.Sequential(nn.Conv2d(64, 32, 1, 1), nn.BatchNorm2d(16))
         
         
-        self.init_desc = self._make_block(512, 512, desc_dim + 1)
-        self.refine8 = self._make_block(512 + desc_dim + 1, 512 + desc_dim + 1, desc_dim + 1)
-        self.refine4 = self._make_block(256 + desc_dim + 1, 256 + desc_dim + 1, desc_dim + 1)
-        self.refine2 = self._make_block(64 + desc_dim + 1, 64 + desc_dim + 1, desc_dim + 1)
-        self.refine1 = self._make_block(32 + desc_dim + 1, 32 + desc_dim + 1, desc_dim + 1)
+        self.init_desc = Mlp(in_features=512,
+                            hidden_features=int(hidden_dim_factor * 512),
+                            out_features=(self.desc_dim + 1))
 
-    def _make_block(self, in_dim, hidden_dim, out_dim, bn_momentum=0.01):
-        return nn.Sequential(
-            nn.Conv2d(in_dim, hidden_dim, 5, padding=2, groups=in_dim, bias=True),
+        self.refine8 = Mlp(in_features=512 + self.desc_dim + 1,
+                            hidden_features=int(hidden_dim_factor * (512 + self.desc_dim + 1)),
+                            out_features=(self.desc_dim + 1))
+        self.refine4 = Mlp(in_features=256 + self.desc_dim + 1,
+                            hidden_features=int(hidden_dim_factor * (256 + self.desc_dim + 1)),
+                            out_features=(self.desc_dim + 1))
+        self.refine2 = Mlp(in_features=64 + self.desc_dim + 1,
+                            hidden_features=int(hidden_dim_factor * (64 + self.desc_dim + 1)),
+                            out_features=(self.desc_dim + 1))
+        self.refine1 = Mlp(in_features=16 + self.desc_dim + 1,
+                            hidden_features=int(hidden_dim_factor * (16 + self.desc_dim + 1)),
+                            out_features=(self.desc_dim + 1))
+
+    # def _make_block(self, in_dim, hidden_dim, out_dim, bn_momentum=0.01):
+    #     return nn.Sequential(
+    #         nn.Conv2d(in_dim, hidden_dim, 5, padding=2, groups=in_dim, bias=True),
             
-            nn.Conv2d(hidden_dim, hidden_dim, 5, padding=2, groups=hidden_dim, bias=True),
-            nn.BatchNorm2d(hidden_dim, momentum = bn_momentum),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(hidden_dim, hidden_dim, 1, 1, 0),
+    #         nn.Conv2d(hidden_dim, hidden_dim, 5, padding=2, groups=hidden_dim, bias=True),
+    #         nn.BatchNorm2d(hidden_dim, momentum = bn_momentum),
+    #         nn.ReLU(inplace=True),
+    #         nn.Conv2d(hidden_dim, hidden_dim, 1, 1, 0),
 
-            nn.Conv2d(hidden_dim, out_dim, 1, 1, 0),
-        )
+    #         nn.Conv2d(hidden_dim, out_dim, 1, 1, 0),
+    #     )
 
     def forward(self, cnn_feats, true_shape, upsample = False, desc = None, certainty = None):  # dict: {"16": f16, "8": f8, "4": f4, "2": f2, "1": f1]
         H1, W1 = true_shape[-2:]

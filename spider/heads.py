@@ -46,17 +46,27 @@ class MultiScaleFM(nn.Module):
         self.refine4 = _make_block(256 + self.desc_dim + 1, 256 + self.desc_dim + 1, self.desc_dim + 1)
         self.refine2 = _make_block(64 + self.desc_dim + 1, 64 + self.desc_dim + 1, self.desc_dim + 1)
         self.refine1 = _make_block(16 + self.desc_dim + 1, 16 + self.desc_dim + 1, self.desc_dim + 1)
-    # def _make_block(self, in_dim, hidden_dim, out_dim, bn_momentum=0.01):
-    #     return nn.Sequential(
-    #         nn.Conv2d(in_dim, hidden_dim, 5, padding=2, groups=in_dim, bias=True),
+    def _make_block(self, in_dim, hidden_dim, out_dim, bn_momentum=0.01):
+        return nn.Sequential(
+            nn.Conv2d(in_dim, hidden_dim, 5, padding=2, groups=in_dim, bias=True),
             
-    #         nn.Conv2d(hidden_dim, hidden_dim, 5, padding=2, groups=hidden_dim, bias=True),
-    #         nn.BatchNorm2d(hidden_dim, momentum = bn_momentum),
-    #         nn.ReLU(inplace=True),
-    #         nn.Conv2d(hidden_dim, hidden_dim, 1, 1, 0),
+            nn.Conv2d(hidden_dim, hidden_dim, 5, padding=2, groups=hidden_dim, bias=True),
+            nn.BatchNorm2d(hidden_dim, momentum = bn_momentum),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_dim, hidden_dim, 1, 1, 0),
 
-    #         nn.Conv2d(hidden_dim, out_dim, 1, 1, 0),
-    #     )
+            nn.Conv2d(hidden_dim, hidden_dim, 5, padding=2, groups=hidden_dim, bias=True),
+            nn.BatchNorm2d(hidden_dim, momentum = bn_momentum),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_dim, hidden_dim, 1, 1, 0),
+
+            nn.Conv2d(hidden_dim, hidden_dim, 5, padding=2, groups=hidden_dim, bias=True),
+            nn.BatchNorm2d(hidden_dim, momentum = bn_momentum),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_dim, hidden_dim, 1, 1, 0),
+
+            nn.Conv2d(hidden_dim, out_dim, 1, 1, 0),
+        )
 
     def forward(self, cnn_feats, true_shape, upsample = False, desc = None, certainty = None):  # dict: {"16": f16, "8": f8, "4": f4, "2": f2, "1": f1]
         H1, W1 = true_shape[-2:]
@@ -75,7 +85,7 @@ class MultiScaleFM(nn.Module):
             del feat
 
         # coarsest_scale = scales[-1]
-        
+
         # sizes = {scale: feat_pyramid[scale].shape[-2:] for scale in feat_pyramid}
 
         

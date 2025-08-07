@@ -40,6 +40,7 @@ pip install -r dust3r/requirements.txt
 # - add support for HEIC images
 # - add required packages for visloc.py
 pip install -r dust3r/requirements_optional.txt
+# conda install -c conda-forge glib
 ```
 
 3. compile and install ASMK

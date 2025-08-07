@@ -34,6 +34,68 @@ def make_batch_symmetric(batch):
 
 
 @torch.no_grad()
+def fm_symmetric_inference(model, img1, img2, device):
+    # combine all ref images into object-centric representation
+    shape1 = img1['true_shape'].to(device, non_blocking=True)
+    shape2 = img2['true_shape'].to(device, non_blocking=True)
+    img1 = img1['img'].to(device, non_blocking=True)
+    img2 = img2['img'].to(device, non_blocking=True)
+    # compute encoder only once
+    feat1, feat2, pos1, pos2, cnn_feats1, cnn_feats2 = model._encode_image_pairs(img1, img2, shape1, shape2)
+
+    def decoder(feat1, feat2, pos1, pos2, shape1, shape2, cnn_feats1, cnn_feats2):
+        dec1, dec2 = model._decoder(feat1, pos1, feat2, pos2)
+        enc_output1, dec_output1 = dec1[0], dec1[-1]
+        enc_output2, dec_output2 = dec2[0], dec2[-1]
+        feat16_1 = torch.cat([enc_output1, dec_output1], dim=-1)
+        feat16_2 = torch.cat([enc_output2, dec_output2], dim=-1)
+        # cnn_feats1.append(feat16_1)
+        # cnn_feats2.append(feat16_2)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning)
+            with torch.cuda.amp.autocast(enabled=False):
+                res1 = model._downstream_head(1, cnn_feats1 + [feat16_1], shape1, upsample = False, desc = None, certainty = None)
+                res2 = model._downstream_head(2, cnn_feats2 + [feat16_2], shape2, upsample = False, desc = None, certainty = None)
+        return res1, res2
+
+    # decoder 1-2
+    res11, res21 = decoder(feat1, feat2, pos1, pos2, shape1, shape2, cnn_feats1, cnn_feats2)
+    # decoder 2-1
+    res22, res12 = decoder(feat2, feat1, pos2, pos1, shape2, shape1, cnn_feats2, cnn_feats1)
+
+    return (res11, res21, res22, res12)
+
+@torch.no_grad()
+def fm_symmetric_inference_upsample(model, img1_coarse, img2_coarse, img1, img2, device):
+    # combine all ref images into object-centric representation
+    coarse_res11, coarse_res21, coarse_res22, coarse_res12 = fm_symmetric_inference(model, img1_coarse, img2_coarse, device)
+    shape1 = img1['true_shape'].to(device, non_blocking=True)
+    shape2 = img2['true_shape'].to(device, non_blocking=True)
+    img1 = img1['img'].to(device, non_blocking=True)
+    img2 = img2['img'].to(device, non_blocking=True)
+    # compute encoder only once
+    cnn_feats1, cnn_feats2 = model._encode_image_pairs_upsample(img1, img2, shape1, shape2)
+    
+    def decoder(shape1, shape2, cnn_feats1, cnn_feats2, desc1, desc2, certainty1, certainty2):
+        # cnn_feats1.append(feat16_1)
+        # cnn_feats2.append(feat16_2)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning)
+            with torch.cuda.amp.autocast(enabled=False):
+                res1 = model._downstream_head(1, cnn_feats1, shape1, upsample = True, desc = desc1, certainty = certainty1)
+                res2 = model._downstream_head(2, cnn_feats2, shape2, upsample = True, desc = desc2, certainty = certainty2)
+        return res1, res2
+
+    # decoder 1-2
+    res11, res21 = decoder(shape1, shape2, cnn_feats1, cnn_feats2, desc1=coarse_res11['desc'], desc2=coarse_res21['desc'], certainty1=coarse_res11['desc_conf'], certainty2=coarse_res21['desc_conf'])
+    # decoder 2-1
+    res22, res12 = decoder(shape2, shape1, cnn_feats2, cnn_feats1, coarse_res22['desc'], coarse_res12['desc'], coarse_res22['desc_conf'], coarse_res12['desc_conf'])
+    return (res11, res21, res22, res12)
+
+
+@torch.no_grad()
 def symmetric_inference(model, img1, img2, device):
     # combine all ref images into object-centric representation
     shape1 = img1['true_shape'].to(device, non_blocking=True)

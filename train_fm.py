@@ -6,7 +6,7 @@
 # training executable for MASt3R
 # --------------------------------------------------------
 from spider.model import SPIDER_FM
-from mast3r.losses import ConfMatchingLoss, MatchingLoss, APLoss, InfoNCE
+from mast3r.losses import ConfMatchingLoss, MatchingLoss, APLoss, InfoNCE, MatchingLoss_Scale16, MatchingLoss_Scale8, MatchingLoss_Scale4, MatchingLoss_Scale2
 from mast3r.datasets import Habitat, ARKitScenes, BlendedMVS, Co3d, MegaDepth, MegaDepth_all, Aerial_MegaDepth, ScanNetpp, StaticThings3D, Waymo, WildRGBD
 
 import mast3r.utils.path_to_dust3r  # noqa
@@ -14,6 +14,11 @@ import mast3r.utils.path_to_dust3r  # noqa
 import dust3r.training
 dust3r.training.SPIDER_FM = SPIDER_FM
 dust3r.training.MatchingLoss = MatchingLoss
+dust3r.training.MatchingLoss_Scale16 = MatchingLoss_Scale16
+dust3r.training.MatchingLoss_Scale8 = MatchingLoss_Scale8
+dust3r.training.MatchingLoss_Scale4 = MatchingLoss_Scale4
+dust3r.training.MatchingLoss_Scale2 = MatchingLoss_Scale2
+
 dust3r.training.ConfMatchingLoss = ConfMatchingLoss
 dust3r.training.InfoNCE = InfoNCE
 dust3r.training.APLoss = APLoss

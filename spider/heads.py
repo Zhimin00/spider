@@ -9,6 +9,12 @@ import dust3r.utils.path_to_croco  # noqa
 from models.blocks import Mlp  # noqa
 inf = float('inf')
 
+def post_process(d, desc_mode, desc_conf_mode):
+    fmap = d.permute(0, 2, 3, 1)
+    desc = reg_desc(fmap[..., :-1], desc_mode)
+    desc_conf = reg_dense_conf(fmap[..., -1], desc_conf_mode)
+    return desc, desc_conf
+
 class MultiScaleFM(nn.Module):
     def __init__(self, desc_dim, desc_mode, desc_conf_mode, patch_size, hidden_dim_factor = 4):
         super().__init__()
@@ -21,24 +27,6 @@ class MultiScaleFM(nn.Module):
         self.proj4 = nn.Sequential(nn.Conv2d(256, 256, 1, 1), nn.BatchNorm2d(256))
         self.proj2 = nn.Sequential(nn.Conv2d(128, 64, 1, 1), nn.BatchNorm2d(64))
         self.proj1 = nn.Sequential(nn.Conv2d(64, 16, 1, 1), nn.BatchNorm2d(16))
-        
-        
-        # self.init_desc = Mlp(in_features=1024+768,
-        #                     hidden_features=int(hidden_dim_factor * (1024+768)),
-        #                     out_features=(self.desc_dim + 1)*4)
-
-        # self.refine8 = Mlp(in_features=512 + self.desc_dim + 1,
-        #                     hidden_features=int(hidden_dim_factor * (512 + self.desc_dim + 1)),
-        #                     out_features=(self.desc_dim + 1)*4)
-        # self.refine4 = Mlp(in_features=256 + self.desc_dim + 1,
-        #                     hidden_features=int(hidden_dim_factor * (256 + self.desc_dim + 1)),
-        #                     out_features=(self.desc_dim + 1)*4)
-        # self.refine2 = Mlp(in_features=128 + self.desc_dim + 1,
-        #                     hidden_features=int(hidden_dim_factor * (128 + self.desc_dim + 1)),
-        #                     out_features=(self.desc_dim + 1)*4)
-        # self.refine1 = Mlp(in_features=64 + self.desc_dim + 1,
-        #                     hidden_features=int(hidden_dim_factor * (64 + self.desc_dim + 1)),
-        #                     out_features=(self.desc_dim + 1))
 
         self.init_desc = self._make_block(512, 512, self.desc_dim + 1)
 
@@ -72,48 +60,6 @@ class MultiScaleFM(nn.Module):
         )
 
     def forward(self, cnn_feats, true_shape, upsample = False, desc = None, certainty = None):  # dict: {"16": f16, "8": f8, "4": f4, "2": f2, "1": f1]
-        # H, W = true_shape
-        # if upsample:
-        #     scales = [1, 2, 4, 8]
-        # else:
-        #     scales = [1, 2, 4, 8, 16]
-        # N_Hs = [H // s if s != 16 else H // self.patch_size for s in scales]
-        # N_Ws = [W // s if s != 16 else W // self.patch_size for s in scales]
-
-        # feat_pyramid = {}
-        # for i, s in enumerate(scales):
-        #     nh, nw = N_Hs[i], N_Ws[i]
-        #     feat = rearrange(cnn_feats[i], 'b (nh nw) c -> b nh nw c', nh=nh, nw=nw)
-        #     # feat_pyramid[s] = feat.permute(0, 3, 1, 2).contiguous()  ## b, c, nh, nw
-        #     feat_pyramid[s] = feat  ##  b, c, nh, nw
-        #     del feat
-
-        # if upsample:
-        #     d = torch.cat([desc, certainty], dim=-1) 
-        #     d = F.interpolate(d, size = (N_Hs[3], N_Ws[3]), mode='binear') #B, H//8, W//8, D
-
-        # else:
-        #     d = self.init_desc(feat_pyramid[16]) #B, H//16, W//16, D * 4
-        #     d = F.pixel_shuffle(d.permute(0, 3, 1, 2), 2).permute(0, 2, 3, 1)  # B,H//8,W//8, D
-
-        # d = self.refine8(torch.cat([d, feat_pyramid[8]], dim=-1)) # B,H//8,W//8, D*4
-        # d = F.pixel_shuffle(d.permute(0, 3, 1, 2), 2).permute(0, 2, 3, 1) # B, H//4, W//4, D
-
-        # d = self.refine4(torch.cat([d, feat_pyramid[4]], dim=-1)) # B,H//4,W//4, D*4
-        # d = F.pixel_shuffle(d.permute(0, 3, 1, 2), 2).permute(0, 2, 3, 1) # B, H//2, W//2, D
-
-        # d = self.refine2(torch.cat([d, feat_pyramid[2]], dim=-1)) # B,H//2,W//2, D*4
-        # d = F.pixel_shuffle(d.permute(0, 3, 1, 2), 2).permute(0, 2, 3, 1) # B, H//1, W//1, D
-
-        # d = self.refine1(torch.cat([d, feat_pyramid[1]], dim=-1)) # B,H//1,W//1, D
-        
-        # desc, desc_conf = d[..., :-1], d[..., -1]
-
-        # ## postprocess
-        # desc = reg_desc(desc, mode = self.desc_mode)
-        # desc_conf = reg_dense_conf(desc_conf, mode = self.desc_conf_mode)
-        # return {'desc': desc, 'desc_conf': desc_conf}  # [B, H, W, D], [B, H, W]
-
         H1, W1 = true_shape[-2:]
         if upsample:
             scales = [1, 2, 4, 8]
@@ -129,54 +75,60 @@ class MultiScaleFM(nn.Module):
             feat_pyramid[s] = feat  ##  b, c, nh, nw
             del feat
         
-        # coarsest_scale = scales[-1]
-
-        # sizes = {scale: feat_pyramid[scale].shape[-2:] for scale in feat_pyramid}
-
-        
         if upsample:
             d = torch.cat([desc, certainty.unsqueeze(-1)], dim=-1)
             d = d.permute(0, 3, 1, 2)
         else:
             d = self.init_desc(self.proj16(feat_pyramid[16]))
+            desc_16, desc_conf_16 = post_process(d, self.desc_mode, self.desc_conf_mode)
             
         d = F.interpolate(
                 d,
                 size=(N_Hs[3], N_Ws[3]),
                 mode="bilinear",
             ) # [B, D+1, H//8, W//8]
-            
+        d = d.detach()
+
         d = self.refine8(torch.cat([d, self.proj8(feat_pyramid[8])], dim=1)) + d # [B, D+1, H//8, W//8]
+        desc_8, desc_conf_8 = post_process(d, self.desc_mode, self.desc_conf_mode)
+
         d =  F.interpolate(
                     d,
                     size=(N_Hs[2], N_Ws[2]),
                     mode="bilinear",
                 )  # [B, D+1, H//4, W//4]
+        d = d.detach()
         
         d = self.refine4(torch.cat([d, self.proj4(feat_pyramid[4])], dim=1)) + d # [B, D+1, H//4, W//4]
+        desc_4, desc_conf_4 = post_process(d, self.desc_mode, self.desc_conf_mode)
+
         d =  F.interpolate(
                     d,
                     size=(N_Hs[1], N_Ws[1]),
                     mode="bilinear",
                 )  # [B, D+1, H//2, W//2]
-        
+        d = d.detach()
+
         d = self.refine2(torch.cat([d, self.proj2(feat_pyramid[2])], dim=1)) + d # [B, D+1, H//2, W//2]
+        desc_2, desc_conf_2 = post_process(d, self.desc_mode, self.desc_conf_mode)
+        
         d =  F.interpolate(
                     d,
                     size=(N_Hs[0], N_Ws[0]),
                     mode="bilinear",
                 )  # [B, D+1, H//1, W//1]
-        d = self.refine1(torch.cat([d, self.proj1(feat_pyramid[1])], dim=1)) + d # [B, D+1, H, W]
-        d = d.permute(0, 2, 3, 1)
-        
-        desc, desc_conf = d[..., :-1], d[..., -1]
-        # desc = desc.permute(0, 2, 3, 1)
-        # desc_conf = desc_conf.permute(0, 2, 3, 1)
+        d = d.detach()
 
-        ## postprocess
-        desc = reg_desc(desc, mode = self.desc_mode)
-        desc_conf = reg_dense_conf(desc_conf, mode = self.desc_conf_mode)
-        return {'desc': desc, 'desc_conf': desc_conf}  # [B, H, W, D], [B, H, W, 1]
+        d = self.refine1(torch.cat([d, self.proj1(feat_pyramid[1])], dim=1)) + d # [B, D+1, H, W]
+        
+        desc, desc_conf = post_process(d, self.desc_mode, self.desc_conf_mode)
+
+        return {'desc': desc, 'desc_conf': desc_conf, # [B, H, W, D], [B, H, W]
+                'desc_16': desc_16, 'desc_conf_16': desc_conf_16,
+                'desc_8': desc_8, 'desc_conf_8': desc_conf_8,
+                'desc_4': desc_4, 'desc_conf_4': desc_conf_4,
+                'desc_2': desc_2, 'desc_conf_2': desc_conf_2,
+                }  
 
 
 class MultiScaleFM_MLP(nn.Module):
@@ -223,9 +175,9 @@ class MultiScaleFM_MLP(nn.Module):
             del feat
 
         if upsample:
-            d = torch.cat([desc, certainty], dim=-1) 
-            d = F.interpolate(d, size = (N_Hs[3], N_Ws[3]), mode='binear') #B, H//8, W//8, D
-
+            d = torch.cat([desc, certainty.unsqueeze(-1)], dim=-1) #B, H//8, W//8, D
+            d = F.interpolate(d.permute(0, 3, 1, 2), size = (N_Hs[3], N_Ws[3]), mode='bilinear') #B, H//8, W//8, D
+            d = d.permute(0, 2, 3, 1)
         else:
             d = self.init_desc(feat_pyramid[16]) #B, H//16, W//16, D * 4
             d = F.pixel_shuffle(d.permute(0, 3, 1, 2), 2).permute(0, 2, 3, 1)  # B,H//8,W//8, D

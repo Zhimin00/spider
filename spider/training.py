@@ -37,6 +37,15 @@ import croco.utils.misc as misc  # noqa
 from croco.utils.misc import NativeScalerWithGradNormCount as NativeScaler  # noqa
 import pdb
 
+def adjust_learning_rate_spider(optimizer, epoch, args):
+    """Decay the learning rate tp 1/10 after warmup"""
+    
+    if epoch == args.warmup_epochs:
+        for param_group in optimizer.param_groups:
+            param_group["lr"] *= 0.1
+    lr = optimizer.param_groups[0]["lr"]
+    return lr
+
 def get_args_parser():
     parser = argparse.ArgumentParser('SPIDER training', add_help=False)
     # model and criterion
@@ -303,7 +312,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         # we use a per iteration (instead of per epoch) lr scheduler
         if data_iter_step % accum_iter == 0:
-            misc.adjust_learning_rate_spider(optimizer, epoch_f, args)
+            adjust_learning_rate_spider(optimizer, epoch_f, args)
         if batch is None:
             continue
         loss_tuple = loss_of_one_batch(batch, model, criterion, device,

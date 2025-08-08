@@ -34,6 +34,7 @@ class MultiScaleFM(nn.Module):
         self.refine4 = self._make_block(256 + self.desc_dim + 1, 256 + self.desc_dim + 1, self.desc_dim + 1)
         self.refine2 = self._make_block(64 + self.desc_dim + 1, 64 + self.desc_dim + 1, self.desc_dim + 1)
         self.refine1 = self._make_block(16 + self.desc_dim + 1, 16 + self.desc_dim + 1, self.desc_dim + 1)
+        
     def _make_block(self, in_dim, hidden_dim, out_dim, bn_momentum=0.01):
         return nn.Sequential(
             nn.Conv2d(in_dim, hidden_dim, kernel_size=5, stride=1, padding=2, groups=in_dim, bias=True),
@@ -78,6 +79,7 @@ class MultiScaleFM(nn.Module):
         if upsample:
             d = torch.cat([desc, certainty.unsqueeze(-1)], dim=-1)
             d = d.permute(0, 3, 1, 2)
+            desc_16 = desc_conf_16 = None
         else:
             d = self.init_desc(self.proj16(feat_pyramid[16]))
             desc_16, desc_conf_16 = post_process(d, self.desc_mode, self.desc_conf_mode)

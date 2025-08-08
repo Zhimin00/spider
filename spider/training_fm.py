@@ -37,6 +37,20 @@ import croco.utils.misc as misc  # noqa
 from croco.utils.misc import NativeScalerWithGradNormCount as NativeScaler  # noqa
 import pdb
 
+def adjust_learning_rate_spider(optimizer, epoch, args):
+    """Decay the learning rate with half-cycle cosine after warmup"""
+    
+    # if epoch < args.warmup_epochs:
+    #     lr = args.lr * epoch / args.warmup_epochs 
+    # else:
+    #     lr = args.min_lr + (args.lr - args.min_lr) * 0.5 * \
+    #         (1. + math.cos(math.pi * (epoch - args.warmup_epochs) / (args.epochs - args.warmup_epochs)))
+    if epoch == args.warmup_epochs:
+        for param_group in optimizer.param_groups:
+            param_group["lr"] *= 0.1
+    lr = optimizer.param_groups[0]["lr"]
+    return lr
+
 def get_args_parser():
     parser = argparse.ArgumentParser('SPIDER_FM training', add_help=False)
     # model and criterion
@@ -162,13 +176,15 @@ def train(args):
         model_without_ddp = model.module
 
     # following timm: set wd as 0 for bias and norm layers
-    param_groups = misc.get_parameter_groups(model_without_ddp, args.weight_decay)
-    optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
-    # param_groups = [
-    #     {"params": model_without_ddp.cnn.parameters(), "lr": 32 * 5e-6 / 8},
-    #     {"params": model_without_ddp.downstream_head.parameters(), "lr": 32 * 1e-4 / 8},
-    # ]
-    # optimizer = torch.optim.AdamW(param_groups, weight_decay=0.01)
+    # param_groups = misc.get_parameter_groups(model_without_ddp, args.weight_decay)
+    # optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
+    param_groups = [
+        {"params": model_without_ddp.cnn.parameters(), "lr": 32 * 5e-6 / 8},
+        {"params": model_without_ddp.downstream_head1.parameters(), "lr": 32 * 1e-4 / 8},
+        {"params": model_without_ddp.downstream_head2.parameters(), "lr": 32 * 1e-4 / 8},
+    ]
+
+    optimizer = torch.optim.AdamW(param_groups, weight_decay=0.01)
     print(optimizer)
     loss_scaler = NativeScaler()
 
@@ -304,7 +320,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         # we use a per iteration (instead of per epoch) lr scheduler
         if data_iter_step % accum_iter == 0:
-            misc.adjust_learning_rate(optimizer, epoch_f, args)
+            adjust_learning_rate_spider(optimizer, epoch_f, args)
 
         loss_tuple = loss_of_one_batch_fm(batch, model, criterion, device,
                                        symmetrize_batch=True,

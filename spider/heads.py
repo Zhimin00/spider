@@ -26,14 +26,16 @@ class MultiScaleFM(nn.Module):
         self.proj8 = nn.Sequential(nn.Conv2d(512, 512, 1, 1), nn.BatchNorm2d(512))
         self.proj4 = nn.Sequential(nn.Conv2d(256, 256, 1, 1), nn.BatchNorm2d(256))
         self.proj2 = nn.Sequential(nn.Conv2d(128, 64, 1, 1), nn.BatchNorm2d(64))
-        self.proj1 = nn.Sequential(nn.Conv2d(64, 16, 1, 1), nn.BatchNorm2d(16))
+        self.proj1 = nn.Sequential(nn.Conv2d(64, 32, 1, 1), nn.BatchNorm2d(32))
 
         self.init_desc = self._make_block(512, 512, self.desc_dim + 1)
 
+        self.refine16 = self._make_block(512 + self.desc_dim + 1, 512 + self.desc_dim + 1, self.desc_dim + 1)
         self.refine8 = self._make_block(512 + self.desc_dim + 1, 512 + self.desc_dim + 1, self.desc_dim + 1)
         self.refine4 = self._make_block(256 + self.desc_dim + 1, 256 + self.desc_dim + 1, self.desc_dim + 1)
         self.refine2 = self._make_block(64 + self.desc_dim + 1, 64 + self.desc_dim + 1, self.desc_dim + 1)
-        self.refine1 = self._make_block(16 + self.desc_dim + 1, 16 + self.desc_dim + 1, self.desc_dim + 1)
+        self.refine1 = self._make_block(32 + self.desc_dim + 1, 32 + self.desc_dim + 1, self.desc_dim + 1)
+        
         
     def _make_block(self, in_dim, hidden_dim, out_dim, bn_momentum=0.01):
         return nn.Sequential(
@@ -81,7 +83,9 @@ class MultiScaleFM(nn.Module):
             d = d.permute(0, 3, 1, 2)
             desc_16 = desc_conf_16 = None
         else:
-            d = self.init_desc(self.proj16(feat_pyramid[16]))
+            f16 = self.proj16(feat_pyramid[16])
+            d = self.init_desc(f16)
+            d = self.refine16(torch.cat([d, f16], dim=1)) + d
             desc_16, desc_conf_16 = post_process(d, self.desc_mode, self.desc_conf_mode)
             
         d = F.interpolate(

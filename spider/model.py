@@ -303,6 +303,7 @@ class SPIDER_FM (CroCoNet):
     """
 
     def __init__(self,
+                 detach=True,
                  head_type='fm',
                  freeze='backbone',
                  patch_embed_cls='PatchEmbedDust3R',  # PatchEmbedDust3R or ManyAR_PatchEmbed
@@ -312,6 +313,7 @@ class SPIDER_FM (CroCoNet):
                  desc_mode=('norm'),
                  desc_conf_mode=('exp', 0, inf),
                  **croco_kwargs):
+        self.detach = detach
         self.desc_conf_mode = desc_conf_mode
         self.desc_mode = desc_mode
         self.local_feat_dim = local_feat_dim
@@ -528,7 +530,7 @@ class SPIDER_FM (CroCoNet):
             with torch.cuda.amp.autocast(enabled=False):
                 res1 = self._downstream_head(1, cnn_feats1, shape1, upsample = False, desc = None, certainty = None)
                 res2 = self._downstream_head(2, cnn_feats2, shape2, upsample = False, desc = None, certainty = None)
-        
+
         return res1, res2
     
     def match(self, view1, view2, desc1=None, certainty1=None, desc2=None, certainty2=None):

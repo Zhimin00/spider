@@ -213,7 +213,7 @@ class MultiScaleFM_MLP(nn.Module):
         
         if self.detach:
             d = d.detach()
-            
+
         d = self.refine2(torch.cat([d, feat_pyramid[2]], dim=-1)) # B,H//2,W//2, D*4
         d = F.pixel_shuffle(d.permute(0, 3, 1, 2), 2).permute(0, 2, 3, 1) # B, H//1, W//1, D
 
@@ -422,9 +422,9 @@ def head_factory(head_type, net):
         return WarpHead(decoder, patch_size)
     
     elif head_type == 'fm':
-        return MultiScaleFM(net.local_feat_dim, net.desc_mode, net.desc_conf_mode, patch_size)
+        return MultiScaleFM(net.local_feat_dim, net.desc_mode, net.desc_conf_mode, patch_size, net.detach)
     elif head_type == 'fm_mlp':
-        return MultiScaleFM_MLP(net.local_feat_dim, net.desc_mode, net.desc_conf_mode, patch_size)
+        return MultiScaleFM_MLP(net.local_feat_dim, net.desc_mode, net.desc_conf_mode, patch_size, net.detach)
     else:
         raise NotImplementedError(
             f"unexpected {head_type=}")

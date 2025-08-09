@@ -42,20 +42,20 @@ class MultiScaleFM(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(hidden_dim, hidden_dim, 1, 1, 0),
 
-            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=5, stride=1, padding=2, groups=hidden_dim, bias=True),
-            nn.BatchNorm2d(hidden_dim, momentum = bn_momentum),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(hidden_dim, hidden_dim, 1, 1, 0),
+            # nn.Conv2d(hidden_dim, hidden_dim, kernel_size=5, stride=1, padding=2, groups=hidden_dim, bias=True),
+            # nn.BatchNorm2d(hidden_dim, momentum = bn_momentum),
+            # nn.ReLU(inplace=True),
+            # nn.Conv2d(hidden_dim, hidden_dim, 1, 1, 0),
 
-            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=5, stride=1, padding=2, groups=hidden_dim, bias=True),
-            nn.BatchNorm2d(hidden_dim, momentum = bn_momentum),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(hidden_dim, hidden_dim, 1, 1, 0),
+            # nn.Conv2d(hidden_dim, hidden_dim, kernel_size=5, stride=1, padding=2, groups=hidden_dim, bias=True),
+            # nn.BatchNorm2d(hidden_dim, momentum = bn_momentum),
+            # nn.ReLU(inplace=True),
+            # nn.Conv2d(hidden_dim, hidden_dim, 1, 1, 0),
 
-            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=5, stride=1, padding=2, groups=hidden_dim, bias=True),
-            nn.BatchNorm2d(hidden_dim, momentum = bn_momentum),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(hidden_dim, hidden_dim, 1, 1, 0),
+            # nn.Conv2d(hidden_dim, hidden_dim, kernel_size=5, stride=1, padding=2, groups=hidden_dim, bias=True),
+            # nn.BatchNorm2d(hidden_dim, momentum = bn_momentum),
+            # nn.ReLU(inplace=True),
+            # nn.Conv2d(hidden_dim, hidden_dim, 1, 1, 0),
 
             nn.Conv2d(hidden_dim, out_dim, 1, 1, 0),
         )

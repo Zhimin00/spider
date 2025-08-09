@@ -12,6 +12,8 @@ inf = float('inf')
 def post_process(d, desc_mode, desc_conf_mode, mlp=False):
     if not mlp:
         fmap = d.permute(0, 2, 3, 1)
+    else:
+        fmap = d
     desc = reg_desc(fmap[..., :-1], desc_mode)
     desc_conf = reg_dense_conf(fmap[..., -1], desc_conf_mode)
     return desc, desc_conf

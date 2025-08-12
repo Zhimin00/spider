@@ -464,7 +464,7 @@ class MatchingLoss_Scale16 (Criterion, MultiLoss):
     only compare pixels inside an image but not in the whole batch as what would be done usually
     """
 
-    def __init__(self, criterion, withconf=True, use_pts3d=False, negatives_padding=0, blocksize=4096):
+    def __init__(self, criterion, withconf=False, use_pts3d=False, negatives_padding=0, blocksize=4096):
         super().__init__(criterion)
         self.negatives_padding = negatives_padding
         self.use_pts3d = use_pts3d
@@ -586,7 +586,7 @@ class MatchingLoss_Scale8 (Criterion, MultiLoss):
     only compare pixels inside an image but not in the whole batch as what would be done usually
     """
 
-    def __init__(self, criterion, withconf=True, use_pts3d=False, negatives_padding=0, blocksize=4096):
+    def __init__(self, criterion, withconf=False, use_pts3d=False, negatives_padding=0, blocksize=4096):
         super().__init__(criterion)
         self.negatives_padding = negatives_padding
         self.use_pts3d = use_pts3d
@@ -707,7 +707,7 @@ class MatchingLoss_Scale4 (Criterion, MultiLoss):
     only compare pixels inside an image but not in the whole batch as what would be done usually
     """
 
-    def __init__(self, criterion, withconf=True, use_pts3d=False, negatives_padding=0, blocksize=4096):
+    def __init__(self, criterion, withconf=False, use_pts3d=False, negatives_padding=0, blocksize=4096):
         super().__init__(criterion)
         self.negatives_padding = negatives_padding
         self.use_pts3d = use_pts3d
@@ -829,7 +829,7 @@ class MatchingLoss_Scale2 (Criterion, MultiLoss):
     only compare pixels inside an image but not in the whole batch as what would be done usually
     """
 
-    def __init__(self, criterion, withconf=True, use_pts3d=False, negatives_padding=0, blocksize=4096):
+    def __init__(self, criterion, withconf=False, use_pts3d=False, negatives_padding=0, blocksize=4096):
         super().__init__(criterion)
         self.negatives_padding = negatives_padding
         self.use_pts3d = use_pts3d

@@ -159,10 +159,10 @@ class MultiScaleFM_MLP(nn.Module):
         
         self.init_desc = Mlp(in_features=1024 + 768,
                             hidden_features=int(hidden_dim_factor * (1024 + 768)),
-                            out_features=(self.desc_dim + 1))
-        self.refine16 = Mlp(in_features=1024 + 768 + self.desc_dim + 1, 
-                            hidden_features=int(hidden_dim_factor * (1024 + 768 + self.desc_dim + 1)),
-                            out_features=(self.desc_dim + 1))
+                            out_features=(self.desc_dim + 1)*4)
+        # self.refine16 = Mlp(in_features=1024 + 768 + self.desc_dim + 1, 
+        #                     hidden_features=int(hidden_dim_factor * (1024 + 768 + self.desc_dim + 1)),
+        #                     out_features=(self.desc_dim + 1)*4)
         self.refine8 = Mlp(in_features=512 + self.desc_dim + 1,
                             hidden_features=int(hidden_dim_factor * (512 + self.desc_dim + 1)),
                             out_features=(self.desc_dim + 1)*4)

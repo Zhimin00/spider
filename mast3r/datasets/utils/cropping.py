@@ -8,7 +8,8 @@ import numpy as np
 import mast3r.utils.path_to_dust3r  # noqa
 from dust3r.utils.device import to_numpy
 from dust3r.utils.geometry import inv, geotrf
-
+import torch
+import pdb
 
 def reciprocal_1d(corres_1_to_2, corres_2_to_1, ret_recip=False):
     is_reciprocal1 = (corres_2_to_1[corres_1_to_2] == np.arange(len(corres_1_to_2)))
@@ -74,8 +75,91 @@ def extract_correspondences_from_pts3d(view1, view2, target_n_corres, rng=np.ran
     return pos1, pos2, valid
 
 
+def extract_correspondences_from_pts3d_scale(view1, view2, target_n_corres, rng=np.random, ret_xy=True, nneg=0, scale=16):
+    view1, view2 = to_numpy((view1, view2))
+    H1, W1 = view1['pts3d'].shape[:2]
+    H2, W2 = view2['pts3d'].shape[:2]
+
+    ys1, xs1 = torch.meshgrid(
+        torch.arange(0, H1, scale), 
+        torch.arange(0, W1, scale), indexing="ij"
+    )
+    ys2, xs2 = torch.meshgrid(
+        torch.arange(0, H2, scale), 
+        torch.arange(0, W2, scale), indexing="ij"
+    )
+    pts3d1_coarse = view1['pts3d'][ys1, xs1]  # [H//16, W//16, 3]
+    pts3d2_coarse = view2['pts3d'][ys2, xs2]  # [H//16, W//16, 3]
+
+    # project pixels from image1 --> 3d points --> image2 pixels
+    shape1, corres1_to_2 = reproject_view_scale(pts3d1_coarse, view2, pts3d2_coarse.shape[:2])
+    shape2, corres2_to_1 = reproject_view_scale(pts3d2_coarse, view1, pts3d1_coarse.shape[:2])
+    
+    # compute reciprocal correspondences:
+    # pos1 == valid pixels (correspondences) in image1
+    is_reciprocal1, pos1, pos2 = reciprocal_1d(corres1_to_2, corres2_to_1, ret_recip=True)
+    is_reciprocal2 = (corres1_to_2[corres2_to_1] == np.arange(len(corres2_to_1)))
+
+    if target_n_corres is None:
+        if ret_xy:
+            pos1 = unravel_xy(pos1, shape1)
+            pos2 = unravel_xy(pos2, shape2)
+        return pos1, pos2
+    target_n_corres = target_n_corres // (scale ** 2) * 5
+    available_negatives = min((~is_reciprocal1).sum(), (~is_reciprocal2).sum())
+    target_n_positives = int(target_n_corres * (1 - nneg))
+    n_positives = min(len(pos1), target_n_positives)
+    n_negatives = min(target_n_corres - n_positives, available_negatives)
+    if n_negatives + n_positives != target_n_corres:
+        # should be really rare => when there are not enough negatives
+        # in that case, break nneg and add a few more positives ?
+        n_positives = target_n_corres - n_negatives
+        assert n_positives <= len(pos1)
+
+    assert n_positives <= len(pos1)
+    assert n_positives <= len(pos2)
+    assert n_negatives <= (~is_reciprocal1).sum()
+    assert n_negatives <= (~is_reciprocal2).sum()
+    assert n_positives + n_negatives == target_n_corres
+
+    valid = np.ones(n_positives, dtype=bool)
+    if n_positives < len(pos1):
+        # random sub-sampling of valid correspondences
+        perm = rng.permutation(len(pos1))[:n_positives]
+        pos1 = pos1[perm]
+        pos2 = pos2[perm]
+
+    if n_negatives > 0:
+        # add false correspondences if not enough
+        def norm(p): return p / p.sum()
+        pos1 = np.r_[pos1, rng.choice(shape1[0] * shape1[1], size=n_negatives, replace=False, p=norm(~is_reciprocal1))]
+        pos2 = np.r_[pos2, rng.choice(shape2[0] * shape2[1], size=n_negatives, replace=False, p=norm(~is_reciprocal2))]
+        valid = np.r_[valid, np.zeros(n_negatives, dtype=bool)]
+
+    # convert (x+W*y) back to 2d (x,y) coordinates
+    if ret_xy:
+        pos1 = unravel_xy(pos1, shape1)
+        pos2 = unravel_xy(pos2, shape2)
+    return pos1, pos2, valid
+
 def reproject_view(pts3d, view2):
     shape = view2['pts3d'].shape[:2]
+    return reproject(pts3d, view2['camera_intrinsics'], inv(view2['camera_pose']), shape)
+
+
+def reproject_view_scale(pts3d, view2, shape):
+    H, W, THREE = pts3d.shape
+    assert THREE == 3
+    K = view2['camera_intrinsics']
+    world2cam = inv(view2['camera_pose'])
+    # reproject in camera2 space
+    with np.errstate(divide='ignore', invalid='ignore'):
+        pos = geotrf(K @ world2cam[:3], pts3d, norm=1, ncol=2)
+
+    # quantize to pixel positions
+    pos = pos / 16
+    return (H, W), ravel_xy(pos, shape)
+
     return reproject(pts3d, view2['camera_intrinsics'], inv(view2['camera_pose']), shape)
 
 
@@ -86,7 +170,6 @@ def reproject(pts3d, K, world2cam, shape):
     # reproject in camera2 space
     with np.errstate(divide='ignore', invalid='ignore'):
         pos = geotrf(K @ world2cam[:3], pts3d, norm=1, ncol=2)
-
     # quantize to pixel positions
     return (H, W), ravel_xy(pos, shape)
 

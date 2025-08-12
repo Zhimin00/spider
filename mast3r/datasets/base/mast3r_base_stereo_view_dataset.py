@@ -10,7 +10,7 @@ import numpy as np
 import torch
 import copy
 
-from mast3r.datasets.utils.cropping import (extract_correspondences_from_pts3d,
+from mast3r.datasets.utils.cropping import (extract_correspondences_from_pts3d, extract_correspondences_from_pts3d_scale,
                                             gen_random_crops, in2d_rect, crop_to_homography)
 
 import mast3r.utils.path_to_dust3r  # noqa
@@ -244,10 +244,41 @@ class MASt3RBaseStereoViewDataset(BaseStereoViewDataset):
         if self.n_corres > 0 and ('corres' not in view):
             corres1, corres2, valid = extract_correspondences_from_pts3d(*views, self.n_corres,
                                                                          self._rng, nneg=self.nneg)
+            corres1_s16, corres2_s16, valid_s16 = extract_correspondences_from_pts3d_scale(*views, self.n_corres,
+                                                                         self._rng, nneg=self.nneg, scale = 16)
+            corres1_s8, corres2_s8, valid_s8 = extract_correspondences_from_pts3d_scale(*views, self.n_corres,
+                                                                         self._rng, nneg=self.nneg, scale = 8)
+            corres1_s4, corres2_s4, valid_s4 = extract_correspondences_from_pts3d_scale(*views, self.n_corres,
+                                                                         self._rng, nneg=self.nneg, scale = 4)
+            corres1_s2, corres2_s2, valid_s2 = extract_correspondences_from_pts3d_scale(*views, self.n_corres,
+                                                                         self._rng, nneg=self.nneg, scale = 2)
+            
             views[0]['corres'] = corres1
             views[1]['corres'] = corres2
             views[0]['valid_corres'] = valid
             views[1]['valid_corres'] = valid
+
+            views[0]['corres_s16'] = corres1_s16
+            views[1]['corres_s16'] = corres2_s16
+            views[0]['valid_corres_s16'] = valid_s16
+            views[1]['valid_corres_s16'] = valid_s16
+
+            views[0]['corres_s8'] = corres1_s8
+            views[1]['corres_s8'] = corres2_s8
+            views[0]['valid_corres_s8'] = valid_s8
+            views[1]['valid_corres_s8'] = valid_s8
+
+            views[0]['corres_s4'] = corres1_s4
+            views[1]['corres_s4'] = corres2_s4
+            views[0]['valid_corres_s4'] = valid_s4
+            views[1]['valid_corres_s4'] = valid_s4
+
+
+            views[0]['corres_s2'] = corres1_s2
+            views[1]['corres_s2'] = corres2_s2
+            views[0]['valid_corres_s2'] = valid_s2
+            views[1]['valid_corres_s2'] = valid_s2
+
 
         if self.aug_rot90 is False:
             pass

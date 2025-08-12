@@ -391,7 +391,6 @@ class MatchingLoss (Criterion, MultiLoss):
         outdesc1 = outdesc2 = outconfs1 = outconfs2 = None
         # Recover descs, GT corres and valid mask
         desc1, desc2 = self.get_descs(pred1, pred2)
-
         (x1, y1), (x2, y2) = gt1['corres'].unbind(-1), gt2['corres'].unbind(-1) # b*2, 8192
         valid_matches = gt1['valid_corres']
 
@@ -465,7 +464,7 @@ class MatchingLoss_Scale16 (Criterion, MultiLoss):
     only compare pixels inside an image but not in the whole batch as what would be done usually
     """
 
-    def __init__(self, criterion, withconf=False, use_pts3d=False, negatives_padding=0, blocksize=4096):
+    def __init__(self, criterion, withconf=True, use_pts3d=False, negatives_padding=0, blocksize=4096):
         super().__init__(criterion)
         self.negatives_padding = negatives_padding
         self.use_pts3d = use_pts3d
@@ -508,12 +507,14 @@ class MatchingLoss_Scale16 (Criterion, MultiLoss):
         desc1, desc2 = self.get_descs(pred1, pred2)
          
         ## scale 16
-        (x1, y1), (x2, y2) = gt1['corres'].unbind(-1), gt2['corres'].unbind(-1) # b*2, 8192
-        valid_matches = gt1['valid_corres']
-        x1 = x1 // 16
-        y1 = y1 // 16
-        x2 = x2 // 16
-        y2 = y2 // 16
+        (x1, y1), (x2, y2) = gt1['corres_s16'].unbind(-1), gt2['corres_s16'].unbind(-1) # b*2, 8192
+        valid_matches = gt1['valid_corres_s16']
+        # (x1, y1), (x2, y2) = gt1['corres'].unbind(-1), gt2['corres'].unbind(-1) # b*2, 8192
+        # valid_matches = gt1['valid_corres']
+        # x1 = x1 // 16
+        # y1 = y1 // 16
+        # x2 = x2 // 16
+        # y2 = y2 // 16
         # Select descs that have GT matches
         B, N = x1.shape
         batchid = torch.arange(B)[:, None].repeat(1, N)  # B, N
@@ -585,7 +586,7 @@ class MatchingLoss_Scale8 (Criterion, MultiLoss):
     only compare pixels inside an image but not in the whole batch as what would be done usually
     """
 
-    def __init__(self, criterion, withconf=False, use_pts3d=False, negatives_padding=0, blocksize=4096):
+    def __init__(self, criterion, withconf=True, use_pts3d=False, negatives_padding=0, blocksize=4096):
         super().__init__(criterion)
         self.negatives_padding = negatives_padding
         self.use_pts3d = use_pts3d
@@ -628,12 +629,14 @@ class MatchingLoss_Scale8 (Criterion, MultiLoss):
         desc1, desc2 = self.get_descs(pred1, pred2)
          
         ## scale 8
-        (x1, y1), (x2, y2) = gt1['corres'].unbind(-1), gt2['corres'].unbind(-1) # b*2, 8192
-        valid_matches = gt1['valid_corres']
-        x1 = x1 // 8
-        y1 = y1 // 8
-        x2 = x2 // 8
-        y2 = y2 // 8
+        (x1, y1), (x2, y2) = gt1['corres_s8'].unbind(-1), gt2['corres_s8'].unbind(-1) # b*2, 8192
+        valid_matches = gt1['valid_corres_s8']
+        # (x1, y1), (x2, y2) = gt1['corres'].unbind(-1), gt2['corres'].unbind(-1) # b*2, 8192
+        # valid_matches = gt1['valid_corres']
+        # x1 = x1 // 8
+        # y1 = y1 // 8
+        # x2 = x2 // 8
+        # y2 = y2 // 8
         # Select descs that have GT matches
         B, N = x1.shape
         batchid = torch.arange(B)[:, None].repeat(1, N)  # B, N
@@ -704,7 +707,7 @@ class MatchingLoss_Scale4 (Criterion, MultiLoss):
     only compare pixels inside an image but not in the whole batch as what would be done usually
     """
 
-    def __init__(self, criterion, withconf=False, use_pts3d=False, negatives_padding=0, blocksize=4096):
+    def __init__(self, criterion, withconf=True, use_pts3d=False, negatives_padding=0, blocksize=4096):
         super().__init__(criterion)
         self.negatives_padding = negatives_padding
         self.use_pts3d = use_pts3d
@@ -747,12 +750,14 @@ class MatchingLoss_Scale4 (Criterion, MultiLoss):
         desc1, desc2 = self.get_descs(pred1, pred2)
          
         ## scale 4
-        (x1, y1), (x2, y2) = gt1['corres'].unbind(-1), gt2['corres'].unbind(-1) # b*2, 8192
-        x1 = x1 // 4
-        y1 = y1 // 4
-        x2 = x2 // 4
-        y2 = y2 // 4
-        valid_matches = gt1['valid_corres']
+        (x1, y1), (x2, y2) = gt1['corres_s4'].unbind(-1), gt2['corres_s4'].unbind(-1) # b*2, 8192
+        valid_matches = gt1['valid_corres_s4']
+        # (x1, y1), (x2, y2) = gt1['corres'].unbind(-1), gt2['corres'].unbind(-1) # b*2, 8192
+        # x1 = x1 // 4
+        # y1 = y1 // 4
+        # x2 = x2 // 4
+        # y2 = y2 // 4
+        # valid_matches = gt1['valid_corres']
 
         # Select descs that have GT matches
         B, N = x1.shape
@@ -824,7 +829,7 @@ class MatchingLoss_Scale2 (Criterion, MultiLoss):
     only compare pixels inside an image but not in the whole batch as what would be done usually
     """
 
-    def __init__(self, criterion, withconf=False, use_pts3d=False, negatives_padding=0, blocksize=4096):
+    def __init__(self, criterion, withconf=True, use_pts3d=False, negatives_padding=0, blocksize=4096):
         super().__init__(criterion)
         self.negatives_padding = negatives_padding
         self.use_pts3d = use_pts3d
@@ -867,12 +872,14 @@ class MatchingLoss_Scale2 (Criterion, MultiLoss):
         desc1, desc2 = self.get_descs(pred1, pred2)
          
         ## scale 2
-        (x1, y1), (x2, y2) = gt1['corres'].unbind(-1), gt2['corres'].unbind(-1) # b*2, 8192
-        x1 = x1 // 2
-        y1 = y1 // 2
-        x2 = x2 // 2
-        y2 = y2 // 2
-        valid_matches = gt1['valid_corres']
+        (x1, y1), (x2, y2) = gt1['corres_s2'].unbind(-1), gt2['corres_s2'].unbind(-1) # b*2, 8192
+        valid_matches = gt1['valid_corres_s2']
+        # (x1, y1), (x2, y2) = gt1['corres'].unbind(-1), gt2['corres'].unbind(-1) # b*2, 8192
+        # x1 = x1 // 2
+        # y1 = y1 // 2
+        # x2 = x2 // 2
+        # y2 = y2 // 2
+        # valid_matches = gt1['valid_corres']
 
         # Select descs that have GT matches
         B, N = x1.shape

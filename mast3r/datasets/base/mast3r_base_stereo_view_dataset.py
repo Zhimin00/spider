@@ -344,6 +344,10 @@ def transpose_to_landscape(view, revert=False):
 
         # transpose correspondences x and y
         view['corres'] = view['corres'][:, [1, 0]]
+        view['corres_s16'] = view['corres_s16'][:, [1, 0]]
+        view['corres_s8'] = view['corres_s8'][:, [1, 0]]
+        view['corres_s4'] = view['corres_s4'][:, [1, 0]]
+        view['corres_s2'] = view['corres_s2'][:, [1, 0]]
 
 
 def rotate_90(views, k=1):

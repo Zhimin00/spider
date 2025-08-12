@@ -92,8 +92,8 @@ def extract_correspondences_from_pts3d_scale(view1, view2, target_n_corres, rng=
     pts3d2_coarse = view2['pts3d'][ys2, xs2]  # [H//16, W//16, 3]
 
     # project pixels from image1 --> 3d points --> image2 pixels
-    shape1, corres1_to_2 = reproject_view_scale(pts3d1_coarse, view2, pts3d2_coarse.shape[:2])
-    shape2, corres2_to_1 = reproject_view_scale(pts3d2_coarse, view1, pts3d1_coarse.shape[:2])
+    shape1, corres1_to_2 = reproject_view_scale(pts3d1_coarse, view2, pts3d2_coarse.shape[:2], scale=scale)
+    shape2, corres2_to_1 = reproject_view_scale(pts3d2_coarse, view1, pts3d1_coarse.shape[:2], scale=scale)
     
     # compute reciprocal correspondences:
     # pos1 == valid pixels (correspondences) in image1
@@ -105,7 +105,7 @@ def extract_correspondences_from_pts3d_scale(view1, view2, target_n_corres, rng=
             pos1 = unravel_xy(pos1, shape1)
             pos2 = unravel_xy(pos2, shape2)
         return pos1, pos2
-    target_n_corres = target_n_corres // (scale ** 2) * 5
+    target_n_corres = target_n_corres // (scale ** 2) #* 5
     available_negatives = min((~is_reciprocal1).sum(), (~is_reciprocal2).sum())
     target_n_positives = int(target_n_corres * (1 - nneg))
     n_positives = min(len(pos1), target_n_positives)
@@ -147,7 +147,7 @@ def reproject_view(pts3d, view2):
     return reproject(pts3d, view2['camera_intrinsics'], inv(view2['camera_pose']), shape)
 
 
-def reproject_view_scale(pts3d, view2, shape):
+def reproject_view_scale(pts3d, view2, shape, scale):
     H, W, THREE = pts3d.shape
     assert THREE == 3
     K = view2['camera_intrinsics']
@@ -157,7 +157,7 @@ def reproject_view_scale(pts3d, view2, shape):
         pos = geotrf(K @ world2cam[:3], pts3d, norm=1, ncol=2)
 
     # quantize to pixel positions
-    pos = pos / 16
+    pos = pos / scale
     return (H, W), ravel_xy(pos, shape)
 
     return reproject(pts3d, view2['camera_intrinsics'], inv(view2['camera_pose']), shape)

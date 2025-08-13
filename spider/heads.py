@@ -196,8 +196,7 @@ class MultiScaleFM_MLP(nn.Module):
         if upsample:
             d = torch.cat([desc, certainty.unsqueeze(-1)], dim=-1) #B, H//8, W//8, D
             d = F.interpolate(d.permute(0, 3, 1, 2), size = (N_Hs[3], N_Ws[3]), mode='bilinear') #B, H//8, W//8, D
-            d = d.permute(0, 2, 3, 1)
-            desc_8 = desc_conf_8 = None
+            desc_8, desc_conf_8 = post_process(d, self.desc_mode, self.desc_conf_mode)
         else:
             d = self.init_desc(feat_pyramid[16]) #B, H//16, W//16, D*4
             d = F.pixel_shuffle(d.permute(0, 3, 1, 2), 2).permute(0, 2, 3, 1)  # B,H//8,W//8, D

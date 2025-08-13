@@ -196,25 +196,27 @@ class MultiScaleFM_MLP(nn.Module):
         if upsample:
             d = torch.cat([desc, certainty.unsqueeze(-1)], dim=-1) #B, H//8, W//8, D
             d = F.interpolate(d.permute(0, 3, 1, 2), size = (N_Hs[3], N_Ws[3]), mode='bilinear') #B, H//8, W//8, D
+            d = d.permute(0, 2, 3, 1)
             desc_8 = desc_conf_8 = None
         else:
-            d = self.init_desc(feat_pyramid[16]) #B, H//16, W//16, D * 4
+            d = self.init_desc(feat_pyramid[16]) #B, H//16, W//16, D*4
             d = F.pixel_shuffle(d.permute(0, 3, 1, 2), 2).permute(0, 2, 3, 1)  # B,H//8,W//8, D
             desc_8, desc_conf_8 = post_process(d, self.desc_mode, self.desc_conf_mode, mlp=True)
+            d = torch.cat([desc_8, desc_conf_8.unsqueeze(-1)], dim=-1)
         if self.detach:
             d = d.detach()
 
         d = self.refine8(torch.cat([d, feat_pyramid[8]], dim=-1)) # B,H//8,W//8, D*4
         d = F.pixel_shuffle(d.permute(0, 3, 1, 2), 2).permute(0, 2, 3, 1) # B, H//4, W//4, D
         desc_4, desc_conf_4 = post_process(d, self.desc_mode, self.desc_conf_mode, mlp=True)
-        
+        d = torch.cat([desc_4, desc_conf_4.unsqueeze(-1)], dim=-1)
         if self.detach:
             d = d.detach()
 
         d = self.refine4(torch.cat([d, feat_pyramid[4]], dim=-1)) # B,H//4,W//4, D*4
         d = F.pixel_shuffle(d.permute(0, 3, 1, 2), 2).permute(0, 2, 3, 1) # B, H//2, W//2, D
         desc_2, desc_conf_2 = post_process(d, self.desc_mode, self.desc_conf_mode, mlp=True)
-        
+        d = torch.cat([desc_2, desc_conf_2.unsqueeze(-1)], dim=-1)
         if self.detach:
             d = d.detach()
 
@@ -282,12 +284,14 @@ class MultiScaleFM_MLP_brute(nn.Module):
             d = self.init_desc(feat_pyramid[16]) #B, H//16, W//16, D * 4
             d = F.pixel_shuffle(d.permute(0, 3, 1, 2), 2).permute(0, 2, 3, 1)  # B,H//8,W//8, D
             desc_8, desc_conf_8 = post_process(d, self.desc_mode, self.desc_conf_mode, mlp=True)
+            d = torch.cat([desc_8, desc_conf_8.unsqueeze(-1)], dim=-1)
         if self.detach:
             d = d.detach()
 
         d = self.refine8(torch.cat([d, feat_pyramid[8]], dim=-1)) # B,H//8,W//8, D*4
         d = F.pixel_shuffle(d.permute(0, 3, 1, 2), 2).permute(0, 2, 3, 1) # B, H//4, W//4, D
         desc_4, desc_conf_4 = post_process(d, self.desc_mode, self.desc_conf_mode, mlp=True)
+        d = torch.cat([desc_4, desc_conf_4.unsqueeze(-1)], dim=-1)
         
         if self.detach:
             d = d.detach()
@@ -295,7 +299,8 @@ class MultiScaleFM_MLP_brute(nn.Module):
         d = self.refine4(torch.cat([d, feat_pyramid[4]], dim=-1)) # B,H//4,W//4, D*4
         d = F.pixel_shuffle(d.permute(0, 3, 1, 2), 2).permute(0, 2, 3, 1) # B, H//2, W//2, D
         desc_2, desc_conf_2 = post_process(d, self.desc_mode, self.desc_conf_mode, mlp=True)
-        
+        d = torch.cat([desc_2, desc_conf_2.unsqueeze(-1)], dim=-1)
+
         if self.detach:
             d = d.detach()
 

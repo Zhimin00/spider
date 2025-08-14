@@ -200,8 +200,9 @@ class MultiScaleFM_MLP(nn.Module):
         else:
             d = self.init_desc(feat_pyramid[16]) #B, H//16, W//16, D*4
             d = F.pixel_shuffle(d.permute(0, 3, 1, 2), 2).permute(0, 2, 3, 1)  # B,H//8,W//8, D
-            desc_8, desc_conf_8 = post_process(d, self.desc_mode, self.desc_conf_mode, mlp=True)
-            d = torch.cat([desc_8, desc_conf_8.unsqueeze(-1)], dim=-1)
+            desc_8 = desc_conf_8 = None
+            # desc_8, desc_conf_8 = post_process(d, self.desc_mode, self.desc_conf_mode, mlp=True)
+            # d = torch.cat([desc_8, desc_conf_8.unsqueeze(-1)], dim=-1)
         if self.detach:
             d = d.detach()
 
@@ -223,12 +224,13 @@ class MultiScaleFM_MLP(nn.Module):
         d = F.pixel_shuffle(d.permute(0, 3, 1, 2), 2).permute(0, 2, 3, 1) # B, H//1, W//1, D
 
         d = self.refine1(torch.cat([d, feat_pyramid[1]], dim=-1)) # B,H//1,W//1, D
-        
+        desc_before, desc_conf_before = d[..., :-1], d[..., -1]
         desc, desc_conf = post_process(d, self.desc_mode, self.desc_conf_mode, mlp=True)
         return {'desc': desc, 'desc_conf': desc_conf, # [B, H, W, D], [B, H, W]
                 'desc_8': desc_8, 'desc_conf_8': desc_conf_8,
                 'desc_4': desc_4, 'desc_conf_4': desc_conf_4,
                 'desc_2': desc_2, 'desc_conf_2': desc_conf_2,
+                'desc_before': desc_before, 'desc_conf_before': desc_conf_before,
                 }  
 
 

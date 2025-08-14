@@ -89,9 +89,9 @@ def fm_symmetric_inference_upsample(model, img1_coarse, img2_coarse, img1, img2,
         return res1, res2
 
     # decoder 1-2
-    res11, res21 = decoder(shape1, shape2, cnn_feats1, cnn_feats2, desc1=coarse_res11['desc'], desc2=coarse_res21['desc'], certainty1=coarse_res11['desc_conf'], certainty2=coarse_res21['desc_conf'])
+    res11, res21 = decoder(shape1, shape2, cnn_feats1, cnn_feats2, desc1=coarse_res11['desc_before'], desc2=coarse_res21['desc_before'], certainty1=coarse_res11['desc_conf_before'], certainty2=coarse_res21['desc_conf_before'])
     # decoder 2-1
-    res22, res12 = decoder(shape2, shape1, cnn_feats2, cnn_feats1, coarse_res22['desc'], coarse_res12['desc'], coarse_res22['desc_conf'], coarse_res12['desc_conf'])
+    res22, res12 = decoder(shape2, shape1, cnn_feats2, cnn_feats1, coarse_res22['desc_before'], coarse_res12['desc_before'], coarse_res22['desc_conf_before'], coarse_res12['desc_conf_before'])
     return (res11, res21, res22, res12)
 
 

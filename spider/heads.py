@@ -29,11 +29,66 @@ class FM_conv(nn.Module):
 
         self.proj16 = nn.Sequential(nn.Conv2d(1024+768, 512, 1, 1), nn.BatchNorm2d(512))
 
-        self.init_desc = self._make_block(512, 512, (self.desc_dim + 1) * self.patch_size ** 2)
+        self.pred16 = self._make_block(512, 512, (self.desc_dim + 1) * self.patch_size ** 2)
         
     def _make_block(self, in_dim, hidden_dim, out_dim, bn_momentum=0.01):
         return nn.Sequential(
-            nn.Conv2d(in_dim, hidden_dim, kernel_size=3, stride=1, padding=1, groups=in_dim, bias=True),
+            nn.Conv2d(in_dim, hidden_dim, kernel_size=3, stride=1, padding=1, groups=1, bias=False),
+            nn.BatchNorm2d(hidden_dim, momentum = bn_momentum),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(hidden_dim, out_dim, 1, 1, 0),
+            nn.Conv2d(hidden_dim, out_dim, 1, 1, 0),
+        )
+
+    def forward(self, cnn_feats, true_shape, upsample = False, low_desc = None, low_certainty = None):  # dict: {"16": f16, "8": f8, "4": f4, "2": f2, "1": f1]
+        H1, W1 = true_shape[-2:]
+        if upsample:
+            scales = [1, 2, 4, 8]
+        else:
+            scales = [1, 2, 4, 8, 16]
+        N_Hs = [H1 // s if s != 16 else H1 // self.patch_size for s in scales]
+        N_Ws = [W1 // s if s != 16 else W1 // self.patch_size for s in scales]
+        feat_pyramid = {}
+        for i, s in enumerate(scales):
+            nh, nw = N_Hs[i], N_Ws[i]
+            feat = rearrange(cnn_feats[i], 'b (nh nw) c -> b c nh nw', nh=nh, nw=nw)
+            # feat_pyramid[s] = feat.permute(0, 3, 1, 2).contiguous()  ## b, c, nh, nw
+            feat_pyramid[s] = feat  ##  b, c, nh, nw
+            del feat
+        
+        f16 = self.proj16(feat_pyramid[16]) #b, c, h//16, w//16
+        d = self.pred16(f16) #b, (D+1)*256, h//16, w//16
+        d = F.pixel_shuffle(d, self.patch_size) #b, D+1, h, w
+        desc, desc_conf = post_process(d, self.desc_mode, self.desc_conf_mode)
+
+        return {'desc': desc, 'desc_conf': desc_conf, # [B, H, W, D], [B, H, W]
+                }  
+
+class MultiScaleFM_conv(nn.Module):
+    def __init__(self, desc_dim, desc_mode, desc_conf_mode, patch_size, detach = False):
+        super().__init__()
+        self.desc_dim = desc_dim
+        self.desc_mode = desc_mode
+        self.desc_conf_mode = desc_conf_mode
+        self.patch_size = patch_size
+        self.detach = detach
+
+        self.proj16 = nn.Sequential(nn.Conv2d(1024+768, 512, 1, 1), nn.BatchNorm2d(512))
+        self.proj8 = nn.Sequential(nn.Conv2d(512, 512, 1, 1), nn.BatchNorm2d(512))
+        self.proj4 = nn.Sequential(nn.Conv2d(256, 256, 1, 1), nn.BatchNorm2d(256))
+        self.proj2 = nn.Sequential(nn.Conv2d(128, 256, 1, 1), nn.BatchNorm2d(256))
+        self.proj1 = nn.Sequential(nn.Conv2d(64, 256, 1, 1), nn.BatchNorm2d(256))
+
+        self.
+        self.pred16 = self._make_block(512, 512, (self.desc_dim + 1) * self.patch_size ** 2)
+        self.pred8 = self._make_block(512, 512, (self.desc_dim + 1) * 8 ** 2)
+        self.pred4 = self._make_block(256, 256, (self.desc_dim + 1) * 4 ** 2)
+        self.pred2 = self._make_block(256, 256, (self.desc_dim + 1) * 2 ** 2)
+        self.pred1 = self._make_block(256, 256, self.desc_dim + 1)
+        
+    def _make_block(self, in_dim, hidden_dim, out_dim, kernel_size=3, bn_momentum=0.01):
+        return nn.Sequential(
+            nn.Conv2d(in_dim, hidden_dim, kernel_size=kernel_size, stride=1, padding=(kernel_size-1)//2, groups=1, bias=True),
             nn.BatchNorm2d(hidden_dim, momentum = bn_momentum),
             nn.ReLU(inplace=True),
             nn.Conv2d(hidden_dim, hidden_dim, 1, 1, 0),

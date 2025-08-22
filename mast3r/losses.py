@@ -507,8 +507,8 @@ class MatchingLoss_Scale16 (Criterion, MultiLoss):
         desc1, desc2 = self.get_descs(pred1, pred2)
          
         ## scale 16
-        (x1, y1), (x2, y2) = gt1['corres_s16'].unbind(-1), gt2['corres_s16'].unbind(-1) # b*2, 8192
-        valid_matches = gt1['valid_corres_s16']
+        (x1, y1), (x2, y2) = gt1['corres'].unbind(-1), gt2['corres'].unbind(-1) # b*2, 8192
+        valid_matches = gt1['valid_corres']
         # (x1, y1), (x2, y2) = gt1['corres'].unbind(-1), gt2['corres'].unbind(-1) # b*2, 8192
         # valid_matches = gt1['valid_corres']
         # x1 = x1 // 16
@@ -629,8 +629,8 @@ class MatchingLoss_Scale8 (Criterion, MultiLoss):
         desc1, desc2 = self.get_descs(pred1, pred2)
          
         ## scale 8
-        (x1, y1), (x2, y2) = gt1['corres_s8'].unbind(-1), gt2['corres_s8'].unbind(-1) # b*2, 8192
-        valid_matches = gt1['valid_corres_s8']
+        (x1, y1), (x2, y2) = gt1['corres'].unbind(-1), gt2['corres'].unbind(-1) # b*2, 8192
+        valid_matches = gt1['valid_corres']
         # (x1, y1), (x2, y2) = gt1['corres'].unbind(-1), gt2['corres'].unbind(-1) # b*2, 8192
         # valid_matches = gt1['valid_corres']
         # x1 = x1 // 8
@@ -750,8 +750,8 @@ class MatchingLoss_Scale4 (Criterion, MultiLoss):
         desc1, desc2 = self.get_descs(pred1, pred2)
          
         ## scale 4
-        (x1, y1), (x2, y2) = gt1['corres_s4'].unbind(-1), gt2['corres_s4'].unbind(-1) # b*2, 8192
-        valid_matches = gt1['valid_corres_s4']
+        (x1, y1), (x2, y2) = gt1['corres'].unbind(-1), gt2['corres'].unbind(-1) # b*2, 8192
+        valid_matches = gt1['valid_corres']
         # (x1, y1), (x2, y2) = gt1['corres'].unbind(-1), gt2['corres'].unbind(-1) # b*2, 8192
         # x1 = x1 // 4
         # y1 = y1 // 4
@@ -872,8 +872,8 @@ class MatchingLoss_Scale2 (Criterion, MultiLoss):
         desc1, desc2 = self.get_descs(pred1, pred2)
          
         ## scale 2
-        (x1, y1), (x2, y2) = gt1['corres_s2'].unbind(-1), gt2['corres_s2'].unbind(-1) # b*2, 8192
-        valid_matches = gt1['valid_corres_s2']
+        (x1, y1), (x2, y2) = gt1['corres'].unbind(-1), gt2['corres'].unbind(-1) # b*2, 8192
+        valid_matches = gt1['valid_corres']
         # (x1, y1), (x2, y2) = gt1['corres'].unbind(-1), gt2['corres'].unbind(-1) # b*2, 8192
         # x1 = x1 // 2
         # y1 = y1 // 2

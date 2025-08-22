@@ -78,6 +78,11 @@ class MultiScaleFM_conv(nn.Module):
         self.proj2 = nn.Sequential(nn.Conv2d(128, 256, 1, 1), nn.BatchNorm2d(256))
         self.proj1 = nn.Sequential(nn.Conv2d(64, 256, 1, 1), nn.BatchNorm2d(256))
 
+        self.up8 = nn.Sequential(nn.Conv2d(512+512, 512, 1, 1), nn.BatchNorm2d(512), nn.ReLU(inplace=True))
+        self.up4 = nn.Sequential(nn.Conv2d(512+256, 256, 1, 1), nn.BatchNorm2d(256), nn.ReLU(inplace=True))
+        self.up2 = nn.Sequential(nn.Conv2d(256+256, 256, 1, 1), nn.BatchNorm2d(256), nn.ReLU(inplace=True))
+        self.up1 = nn.Sequential(nn.Conv2d(256+256, 256, 1, 1), nn.BatchNorm2d(256), nn.ReLU(inplace=True))
+
         self.pred16 = self._make_block(512, 512, (self.desc_dim + 1) * self.patch_size ** 2)
         self.pred8 = self._make_block(512, 512, (self.desc_dim + 1) * 8 ** 2)
         self.pred4 = self._make_block(256, 256, (self.desc_dim + 1) * 4 ** 2)
@@ -110,11 +115,44 @@ class MultiScaleFM_conv(nn.Module):
             del feat
         
         f16 = self.proj16(feat_pyramid[16]) #b, c, h//16, w//16
-        d = self.init_desc(f16) #b, (D+1)*256, h//16, w//16
-        d = F.pixel_shuffle(d, self.patch_size) #b, D+1, h, w
-        desc, desc_conf = post_process(d, self.desc_mode, self.desc_conf_mode)
+        f8 = self.proj8(feat_pyramid[8])
+        f4 = self.proj4(feat_pyramid[4])
+        f2 = self.proj2(feat_pyramid[2])
+        f1 = self.proj1(feat_pyramid[1])
+
+        pred16 = self.pred16(f16) #b, (D+1)*256, h//16, w//16
+        pred16 = F.pixel_shuffle(pred16, self.patch_size) #b, D+1, h, w
+        desc_16, desc_conf_16 = post_process(pred16, self.desc_mode, self.desc_conf_mode)
+
+        f16_up = F.interpolate(f16, size=(N_Hs[3], N_Ws[3]), mode="bilinear")
+        f8_up = self.up8(torch.cat([f8, f16_up], dim=1))
+        pred8 = self.pred8(f8_up) #b, (D+1)*64, h//8, w//8
+        pred8 = F.pixel_shuffle(pred8, 8) #b, D+1, h, w
+        desc_8, desc_conf_8 = post_process(pred8, self.desc_mode, self.desc_conf_mode)
+
+        f8_up = F.interpolate(f8_up, size=(N_Hs[2], N_Ws[2]), mode="bilinear")
+        f4_up = self.up4(torch.cat([f4, f8_up], dim=1))
+        pred4 = self.pred4(f4_up) #b, (D+1)*16, h//4, w//4
+        pred4 = F.pixel_shuffle(pred4, 4) #b, D+1, h, w
+        desc_4, desc_conf_4 = post_process(pred4, self.desc_mode, self.desc_conf_mode)
+
+        f4_up = F.interpolate(f4_up, size=(N_Hs[1], N_Ws[1]), mode="bilinear")
+        f2_up = self.up2(torch.cat([f2, f4_up], dim=1))
+        pred2 = self.pred2(f2_up) #b, (D+1)*4, h//2, w//2
+        pred2 = F.pixel_shuffle(pred2, 2) #b, D+1, h, w
+        desc_2, desc_conf_2 = post_process(pred2, self.desc_mode, self.desc_conf_mode)
+
+        f2_up = F.interpolate(f4_up, size=(N_Hs[0], N_Ws[0]), mode="bilinear")
+        f1_up = self.up1(torch.cat([f1, f2_up], dim=1))
+       
+        pred1 = self.pred2(f1_up) #b, D+1, h//1, w//1
+        desc, desc_conf = post_process(pred1, self.desc_mode, self.desc_conf_mode)
 
         return {'desc': desc, 'desc_conf': desc_conf, # [B, H, W, D], [B, H, W]
+                'desc_16': desc_16, 'desc_conf_16': desc_conf_16,
+                'desc_8': desc_8, 'desc_conf_8': desc_conf_8,
+                'desc_4': desc_4, 'desc_conf_4': desc_conf_4,
+                'desc_2': desc_2, 'desc_conf_2': desc_conf_2,
                 }  
 
 
@@ -617,6 +655,8 @@ def head_factory(head_type, net):
         return MultiScaleFM_MLP(net.local_feat_dim, net.desc_mode, net.desc_conf_mode, patch_size, detach = net.detach)
     elif head_type == 'fm_conv':
         return FM_conv(net.local_feat_dim, net.desc_mode, net.desc_conf_mode, patch_size, detach = net.detach)
+    elif head_type == 'fm_ms_conv':
+        return MultiScaleFM_conv(net.local_feat_dim, net.desc_mode, net.desc_conf_mode, patch_size, detach = net.detach)
     else:
         raise NotImplementedError(
             f"unexpected {head_type=}")

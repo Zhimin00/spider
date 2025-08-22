@@ -33,7 +33,7 @@ class FM_conv(nn.Module):
         
     def _make_block(self, in_dim, hidden_dim, out_dim, bn_momentum=0.01):
         return nn.Sequential(
-            nn.Conv2d(in_dim, hidden_dim, kernel_size=5, stride=1, padding=2, groups=in_dim, bias=True),
+            nn.Conv2d(in_dim, hidden_dim, kernel_size=3, stride=1, padding=2, groups=in_dim, bias=True),
             nn.BatchNorm2d(hidden_dim, momentum = bn_momentum),
             nn.ReLU(inplace=True),
             nn.Conv2d(hidden_dim, hidden_dim, 1, 1, 0),

@@ -119,14 +119,14 @@ def transpose_to_landscape_fm(head, activate=True):
         then transpose the result in landscape 
         and stack everything back together.
     """
-    def wrapper_no(cnn_feats, true_shape, upsample=False, desc=None, certainty=None):
+    def wrapper_no(cnn_feats, true_shape, upsample=False, low_desc=None, low_certainty=None):
         B = len(true_shape)
         assert true_shape[0:1].allclose(true_shape), 'true_shape must be all identical'
         H, W = true_shape[0].cpu().tolist()
-        res = head(cnn_feats, (H, W), upsample=upsample, desc=desc, certainty=certainty)
+        res = head(cnn_feats, (H, W), upsample=upsample, low_desc=low_desc, low_certainty=low_certainty)
         return res
 
-    def wrapper_yes(cnn_feats, true_shape, upsample=False, desc=None, certainty=None):
+    def wrapper_yes(cnn_feats, true_shape, upsample=False, low_desc=None, low_certainty=None):
         B = len(true_shape)
         # by definition, the batch is in landscape mode so W >= H
         H, W = int(true_shape.min()), int(true_shape.max())
@@ -137,14 +137,14 @@ def transpose_to_landscape_fm(head, activate=True):
 
         # true_shape = true_shape.cpu()
         if is_landscape.all():
-            return head(cnn_feats, (H, W), upsample=upsample, desc=desc, certainty=certainty)
+            return head(cnn_feats, (H, W), upsample=upsample, low_desc=low_desc, low_certainty=low_certainty)
         if is_portrait.all():
-            return transposed(head(cnn_feats, (W, H), upsample=upsample, desc=desc, certainty=certainty))
+            return transposed(head(cnn_feats, (W, H), upsample=upsample, low_desc=low_desc, low_certainty=low_certaintyy))
 
         # batch is a mix of both portraint & landscape
         def cnnout(ar): return [cnn_feat[ar] for cnn_feat in cnn_feats]
-        l_result = head(cnnout(is_landscape), (H, W), upsample=upsample, desc=desc, certainty=certainty)
-        p_result = transposed(head(cnnout(is_portrait), (W, H), upsample=upsample, desc=desc, certainty=certainty))
+        l_result = head(cnnout(is_landscape), (H, W), upsample=upsample, low_desc=low_desc, low_certainty=low_certainty)
+        p_result = transposed(head(cnnout(is_portrait), (W, H), upsample=upsample, low_desc=low_desc, low_certainty=low_certainty))
 
         # allocate full result
         result = {}

@@ -506,11 +506,11 @@ class SPIDER_FM (CroCoNet):
         final_output[-1] = tuple(map(self.dec_norm, final_output[-1]))
         return zip(*final_output)
 
-    def _downstream_head(self, head_num, cnn_feats, shape, upsample=False, desc = None, certainty = None):
+    def _downstream_head(self, head_num, cnn_feats, shape, upsample=False, low_desc = None, low_certainty = None):
         B, S, D = cnn_feats[-1].shape
         # img_shape = tuple(map(int, img_shape))
         head = getattr(self, f'head{head_num}')
-        return head(cnn_feats, shape, upsample=upsample, desc=desc, certainty=certainty)
+        return head(cnn_feats, shape, upsample=upsample, low_desc=low_desc, low_certainty=low_certainty)
 
     def forward(self, view1, view2):
         # encode the two images --> B,S,D
@@ -528,25 +528,11 @@ class SPIDER_FM (CroCoNet):
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=FutureWarning)
             with torch.cuda.amp.autocast(enabled=False):
-                res1 = self._downstream_head(1, cnn_feats1, shape1, upsample = False, desc = None, certainty = None)
-                res2 = self._downstream_head(2, cnn_feats2, shape2, upsample = False, desc = None, certainty = None)
+                res1 = self._downstream_head(1, cnn_feats1, shape1, upsample = False, low_desc = None, low_certainty = None)
+                res2 = self._downstream_head(2, cnn_feats2, shape2, upsample = False, low_desc = None, low_certainty = None)
 
         return res1, res2
     
-    def match(self, view1, view2, desc1=None, certainty1=None, desc2=None, certainty2=None):
-        # encode the two images --> B,S,D
-        assert desc1 is not None and certainty1 is not None
-        assert desc2 is not None and certainty2 is not None
-        
-        (shape1, shape2), (cnn_feats1, cnn_feats2) = self._encode_symmetrized_upsample(view1, view2)
-
-        import warnings
-        with warnings.catch_warnings():
-            warnings.filterwarnings("ignore", category=FutureWarning)
-            with torch.cuda.amp.autocast(enabled=False):
-                res1 = self._downstream_head(1, cnn_feats1, shape1, upsample=True, desc = desc1, certainty = certainty1)
-                res2 = self._downstream_head(2, cnn_feats2, shape2, upsample=True, desc = desc2, certainty = certainty2)
-        return res1, res2
     
 class RelPoseEmbedGenerator(nn.Module):
     def __init__(self, embed_dim):

@@ -55,8 +55,8 @@ def fm_symmetric_inference(model, img1, img2, device):
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=FutureWarning)
             with torch.cuda.amp.autocast(enabled=False):
-                res1 = model._downstream_head(1, cnn_feats1 + [feat16_1], shape1, upsample = False, desc = None, certainty = None)
-                res2 = model._downstream_head(2, cnn_feats2 + [feat16_2], shape2, upsample = False, desc = None, certainty = None)
+                res1 = model._downstream_head(1, cnn_feats1 + [feat16_1], shape1, upsample = False, low_desc = None, low_certainty = None)
+                res2 = model._downstream_head(2, cnn_feats2 + [feat16_2], shape2, upsample = False, low_desc = None, low_certainty = None)
         return res1, res2
 
     # decoder 1-2
@@ -77,21 +77,25 @@ def fm_symmetric_inference_upsample(model, img1_coarse, img2_coarse, img1, img2,
     # compute encoder only once
     cnn_feats1, cnn_feats2 = model._encode_image_pairs_upsample(img1, img2, shape1, shape2)
     
-    def decoder(shape1, shape2, cnn_feats1, cnn_feats2, desc1, desc2, certainty1, certainty2):
+    def decoder(shape1, shape2, cnn_feats1, cnn_feats2, low_desc1, low_desc2, low_certainty1, low_certainty2):
         # cnn_feats1.append(feat16_1)
         # cnn_feats2.append(feat16_2)
         import warnings
         with warnings.catch_warnings():
             warnings.filterwarnings("ignore", category=FutureWarning)
             with torch.cuda.amp.autocast(enabled=False):
-                res1 = model._downstream_head(1, cnn_feats1, shape1, upsample = True, desc = desc1, certainty = certainty1)
-                res2 = model._downstream_head(2, cnn_feats2, shape2, upsample = True, desc = desc2, certainty = certainty2)
+                res1 = model._downstream_head(1, cnn_feats1, shape1, upsample = True, low_desc = low_desc1, low_certainty = low_certainty1)
+                res2 = model._downstream_head(2, cnn_feats2, shape2, upsample = True, low_desc = low_desc2, low_certainty = low_certainty2)
         return res1, res2
-
     # decoder 1-2
-    res11, res21 = decoder(shape1, shape2, cnn_feats1, cnn_feats2, desc1=coarse_res11['desc_before'], desc2=coarse_res21['desc_before'], certainty1=coarse_res11['desc_conf_before'], certainty2=coarse_res21['desc_conf_before'])
+    res11, res21 = decoder(shape1, shape2, cnn_feats1, cnn_feats2, low_desc1=coarse_res11['desc'], low_desc2=coarse_res21['desc'], low_certainty1=coarse_res11['desc_conf'], low_certainty2=coarse_res21['desc_conf'])
     # decoder 2-1
-    res22, res12 = decoder(shape2, shape1, cnn_feats2, cnn_feats1, coarse_res22['desc_before'], coarse_res12['desc_before'], coarse_res22['desc_conf_before'], coarse_res12['desc_conf_before'])
+    res22, res12 = decoder(shape2, shape1, cnn_feats2, cnn_feats1, low_desc1=coarse_res22['desc'], low_desc2=coarse_res12['desc'], low_certainty1=coarse_res22['desc_conf'], low_certainty2=coarse_res12['desc_conf'])
+
+    # # decoder 1-2
+    # res11, res21 = decoder(shape1, shape2, cnn_feats1, cnn_feats2, low_desc1=coarse_res11['desc_before'], low_desc2=coarse_res21['desc_before'], low_certainty1=coarse_res11['desc_conf_before'], low_certainty2=coarse_res21['desc_conf_before'])
+    # # decoder 2-1
+    # res22, res12 = decoder(shape2, shape1, cnn_feats2, cnn_feats1, low_desc1=coarse_res22['desc_before'], low_desc2=coarse_res12['desc_before'], low_certainty1=coarse_res22['desc_conf_before'], low_certainty2=coarse_res12['desc_conf_before'])
     return (res11, res21, res22, res12)
 
 

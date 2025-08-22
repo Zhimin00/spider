@@ -56,7 +56,6 @@ class FM_conv(nn.Module):
             del feat
         
         f16 = self.proj16(feat_pyramid[16]) #b, c, h//16, w//16
-        pdb.set_trace()
         d = self.pred16(f16) #b, (D+1)*256, h//16, w//16
         d = F.pixel_shuffle(d, self.patch_size) #b, D+1, h, w
         desc, desc_conf = post_process(d, self.desc_mode, self.desc_conf_mode)

@@ -40,7 +40,7 @@ class FM_conv(nn.Module):
             nn.Conv2d(hidden_dim, out_dim, 1, 1, 0),
         )
 
-    def forward(self, cnn_feats, true_shape, upsample = False, desc = None, certainty = None):  # dict: {"16": f16, "8": f8, "4": f4, "2": f2, "1": f1]
+    def forward(self, cnn_feats, true_shape, upsample = False, low_desc = None, low_certainty = None):  # dict: {"16": f16, "8": f8, "4": f4, "2": f2, "1": f1]
         H1, W1 = true_shape[-2:]
         if upsample:
             scales = [1, 2, 4, 8]
@@ -114,7 +114,7 @@ class MultiScaleFM(nn.Module):
             nn.Conv2d(hidden_dim, out_dim, 1, 1, 0),
         )
 
-    def forward(self, cnn_feats, true_shape, upsample = False, desc = None, certainty = None):  # dict: {"16": f16, "8": f8, "4": f4, "2": f2, "1": f1]
+    def forward(self, cnn_feats, true_shape, upsample = False, low_desc = None, low_certainty = None):  # dict: {"16": f16, "8": f8, "4": f4, "2": f2, "1": f1]
         H1, W1 = true_shape[-2:]
         if upsample:
             scales = [1, 2, 4, 8]
@@ -131,7 +131,7 @@ class MultiScaleFM(nn.Module):
             del feat
         
         if upsample:
-            d = torch.cat([desc, certainty.unsqueeze(-1)], dim=-1)
+            d = torch.cat([low_desc, low_certainty.unsqueeze(-1)], dim=-1)
             d = d.permute(0, 3, 1, 2)
             desc_16 = desc_conf_16 = None
         else:

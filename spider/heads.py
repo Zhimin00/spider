@@ -79,7 +79,6 @@ class MultiScaleFM_conv(nn.Module):
         self.proj2 = nn.Sequential(nn.Conv2d(128, 256, 1, 1), nn.BatchNorm2d(256))
         self.proj1 = nn.Sequential(nn.Conv2d(64, 256, 1, 1), nn.BatchNorm2d(256))
 
-        self.
         self.pred16 = self._make_block(512, 512, (self.desc_dim + 1) * self.patch_size ** 2)
         self.pred8 = self._make_block(512, 512, (self.desc_dim + 1) * 8 ** 2)
         self.pred4 = self._make_block(256, 256, (self.desc_dim + 1) * 4 ** 2)

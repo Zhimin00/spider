@@ -139,7 +139,7 @@ def transpose_to_landscape_fm(head, activate=True):
         if is_landscape.all():
             return head(cnn_feats, (H, W), upsample=upsample, low_desc=low_desc, low_certainty=low_certainty)
         if is_portrait.all():
-            return transposed(head(cnn_feats, (W, H), upsample=upsample, low_desc=low_desc, low_certainty=low_certaintyy))
+            return transposed(head(cnn_feats, (W, H), upsample=upsample, low_desc=low_desc, low_certainty=low_certainty))
 
         # batch is a mix of both portraint & landscape
         def cnnout(ar): return [cnn_feat[ar] for cnn_feat in cnn_feats]

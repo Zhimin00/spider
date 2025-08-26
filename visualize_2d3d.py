@@ -9,9 +9,8 @@ from mast3r.inference import symmetric_inference as mast3r_symmetric_inference
 from mast3r.inference import symmetric_inference_upsample as mast3r_symmetric_inference_upsample
 from mast3r.cloud_opt.sparse_ga import extract_correspondences
 
-from spider.utils.utils import match, match_upsample, match_symmetric, match_symmetric_upsample, sample_symmetric, to_pixel_coordinates, make_symmetric_pairs
+from spider.utils.utils import match, match_upsample, sample_symmetric, to_pixel_coordinates
 from spider.utils.image import load_original_images, resize_image_with_intrinsics
-from spider.inference import inference, inference_upsample, crops_inference
 from spider.inference import symmetric_inference as spider_symmetric_inference
 from spider.inference import symmetric_inference_upsample as spider_symmetric_inference_upsample
 

@@ -3,6 +3,7 @@ from mast3r.model import AsymmetricMASt3R
 from mast3r.utils.coarse_to_fine import select_pairs_of_crops, crop_slice
 from mast3r.utils.collate import cat_collate, cat_collate_fn_map
 from mast3r.fast_nn import fast_reciprocal_NNs
+from mast3r.cloud_opt.sparse_ga import extract_correspondences
 import mast3r.utils.path_to_dust3r # noqa
 from dust3r_visloc.datasets.utils import get_HW_resolution
 from dust3r.inference import loss_of_one_batch
@@ -60,6 +61,41 @@ def symmetric_inference(model, img1, img2, device):
 
     return (res11, res21, res22, res12)
 
+@torch.no_grad()
+def symmetric_inference_upsample(model, img1_coarse, img2_coarse, imgs_fine, device):
+    res = symmetric_inference(model, img1_coarse, img2_coarse, 'cuda')
+    descs = [r['desc'][0] for r in res]
+    qonfs = [r['desc_conf'][0] for r in res]  
+    # perform reciprocal matching
+    corres = extract_correspondences(descs, qonfs, device='cuda', subsample=8)
+    pts1, pts2, mconf = corres
+
+    h1_coarse, w1_coarse = img1_coarse['true_shape'][0]
+    h2_coarse, w2_coarse = img2_coarse['true_shape'][0]
+
+    h1, w1 = imgs_fine[0]['true_shape'][0]
+    h2, w2 = imgs_fine[1]['true_shape'][0]
+    kpts1 = (
+        torch.stack(
+            (
+                (w1 / w1_coarse) * (pts1[..., 0]),
+                (h1 / h1_coarse) * (pts1[..., 1]),
+            ),
+            axis=-1,
+        )
+    )
+    kpts2 = (
+        torch.stack(
+            (
+                (w2 / w2_coarse) * (pts2[..., 0]),
+                (h2 / h2_coarse) * (pts2[..., 1]),
+            ),
+            axis=-1,
+        )
+    )
+                                            
+    kpts1, kpts2, mconf = coarse_to_fine(h1, w1, h2, w2, imgs_fine, kpts1, kpts2, mconf, model, 'cuda')
+    return kpts1, kpts2, mconf
 
 def fine_matching(query_views, map_views, model, device, max_batch_size=48):
     output = crops_inference([query_views, map_views],

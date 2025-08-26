@@ -686,7 +686,7 @@ class MegaDepthPoseEstimationBenchmark:
                     sparse_matches, _ = sample_symmetric(warp1, certainty1, warp2, certainty2, num=5000)
                     view1, view2 = imgs
                     view1, view2 = collate_with_cat([(view1, view2)])
-                    res = symmetric_inference(model2, view1, view2, device)
+                    res = mast3r_symmetric_inference(model2, view1, view2, device)
                     descs = [r['desc'][0] for r in res]
                     qonfs = [r['desc_conf'][0] for r in res]  
                     # perform reciprocal matching

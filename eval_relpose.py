@@ -61,9 +61,9 @@ if __name__ == "__main__":
     parser.add_argument("--coarse_size", default=512, type=int)
     parser.add_argument("--fine_size", default=1344, type=int)
     args, _ = parser.parse_known_args()
-
+    device = "cuda"
     model = SPIDER.from_pretrained("/cis/home/zshao14/checkpoints/spider_mast3r_warp_0730/checkpoint-best.pth").to(device)
-    # mast3r_model = AsymmetricMASt3R.from_pretrained('/cis/home/zshao14/checkpoints/checkpoint-aerial-mast3r.pth').to(device)
+    # mast3r_model = AsymmetricMASt3R.from_pretrained("/cis/home/zshao14/checkpoints/checkpoint-aerial-mast3r.pth").to(device)
     # experiment_name = "spider-0727best_1024"
     experiment_name = args.exp_name
     seed = 42

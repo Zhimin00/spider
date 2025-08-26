@@ -27,9 +27,9 @@ class FM_conv(nn.Module):
         self.patch_size = patch_size
         self.detach = detach
 
-        self.proj16 = nn.Sequential(nn.Conv2d(1024+768, 512, 1, 1), nn.BatchNorm2d(512))
+        self.proj16 = nn.Sequential(nn.Conv2d(1024+768, 1792*4, 1, 1), nn.BatchNorm2d(1792*4))
 
-        self.pred16 = self._make_block(512, 512, (self.desc_dim + 1) * self.patch_size ** 2)
+        self.pred16 = self._make_block(1792*4, 512, (self.desc_dim + 1) * self.patch_size ** 2)
         
     def _make_block(self, in_dim, hidden_dim, out_dim, bn_momentum=0.01):
         return nn.Sequential(

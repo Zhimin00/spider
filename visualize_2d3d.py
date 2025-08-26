@@ -17,7 +17,6 @@ from spider.inference import symmetric_inference_upsample as spider_symmetric_in
 
 import spider.utils.path_to_dust3r #noqa
 from dust3r.utils.device import collate_with_cat
-import pdb
 
 def spider_mast3r_match_path(im_A_path, im_B_path, spider_model, mast3r_model, device = 'cuda', coarse_size=512, fine_size=None, is_scannet=False):
     imgs_ori = load_original_images([im_A_path, im_B_path], verbose=False)
@@ -63,8 +62,7 @@ def spider_mast3r_match_path(im_A_path, im_B_path, spider_model, mast3r_model, d
 
         # mast3r inference
         mast3r_kpts1, mast3r_kpts2, mast3r_mconf = mast3r_symmetric_inference_upsample(mast3r_model, view1_coarse, view2_coarse, imgs_fine, 'cuda')
-    pdb.set_trace()
-    mast3r_kpts1, mast3r_kpts2, mast3r_mconf = mast3r_kpts1.cpu(), mast3r_kpts2.cpu(), mast3r_mconf.cpu()
+
     kpts1 = torch.cat((spider_kpts1, mast3r_kpts1), dim=0)
     kpts2 = torch.cat((spider_kpts2, mast3r_kpts2), dim=0)
     mconf = torch.cat((spider_mconf, mast3r_mconf), dim=0)
@@ -78,8 +76,8 @@ with torch.no_grad():
     im_A_path = '/cis/home/zshao14/Downloads/spider/assets/sacre_coeur/sacre_coeur_A.jpg'
     im_B_path = '/cis/home/zshao14/Downloads/spider/assets/sacre_coeur/sacre_coeur_B.jpg'
 
-    kpts1, kpts2, mconf = spider_mast3r_match_path(im_A_path, im_B_path, spider_model, device, coarse_size=512, fine_size=1600)
-    pdb.set_trace()
+    kpts1, kpts2, mconf = spider_mast3r_match_path(im_A_path, im_B_path, spider_model, mast3r_model, device, coarse_size=512, fine_size=1600)
+    kpts1, kpts2, mconf = kpts1.cpu().numpy(), kpts2.cpu().numpy(), mconf.cpu().numpy()
 
     
                 

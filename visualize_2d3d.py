@@ -63,7 +63,7 @@ def spider_mast3r_match_path(im_A_path, im_B_path, spider_model, mast3r_model, d
 
         # mast3r inference
         mast3r_kpts1, mast3r_kpts2, mast3r_mconf = mast3r_symmetric_inference_upsample(mast3r_model, view1_coarse, view2_coarse, imgs_fine, 'cuda')
-    
+    pdb.set_trace()
     mast3r_kpts1, mast3r_kpts2, mast3r_mconf = mast3r_kpts1.cpu(), mast3r_kpts2.cpu(), mast3r_mconf.cpu()
     kpts1 = torch.cat((spider_kpts1, mast3r_kpts1), dim=0)
     kpts2 = torch.cat((spider_kpts2, mast3r_kpts2), dim=0)

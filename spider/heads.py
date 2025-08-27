@@ -18,6 +18,48 @@ def post_process(d, desc_mode, desc_conf_mode, mlp=False):
     desc_conf = reg_dense_conf(fmap[..., -1], desc_conf_mode)
     return desc, desc_conf
 
+class FM_MLP(nn.Module):
+    def __init__(self, desc_dim, desc_mode, desc_conf_mode, patch_size, hidden_dim_factor = 4, detach=False):
+        super().__init__()
+        self.desc_dim = desc_dim
+        self.desc_mode = desc_mode
+        self.desc_conf_mode = desc_conf_mode
+        self.patch_size = patch_size
+        self.detach = detach
+        
+        
+        self.head_local_features = Mlp(in_features=1024 + 768,
+                            hidden_features=int(hidden_dim_factor * (1024 + 768)),
+                            out_features=(self.desc_dim + 1)*self.patch_size ** 2)
+
+    def forward(self, cnn_feats, true_shape, upsample = False, low_desc = None, low_certainty = None):  # dict: {"16": f16, "8": f8, "4": f4, "2": f2, "1": f1]
+        H, W = true_shape
+        if upsample:
+            scales = [1, 2, 4, 8]
+        else:
+            scales = [1, 2, 4, 8, 16]
+        N_Hs = [H // s if s != 16 else H // self.patch_size for s in scales]
+        N_Ws = [W // s if s != 16 else W // self.patch_size for s in scales]
+
+        feat_pyramid = {}
+        for i, s in enumerate(scales):
+            nh, nw = N_Hs[i], N_Ws[i]
+            feat = rearrange(cnn_feats[i], 'b (nh nw) c -> b nh nw c', nh=nh, nw=nw)
+            # feat_pyramid[s] = feat.permute(0, 3, 1, 2).contiguous()  ## b, c, nh, nw
+            feat_pyramid[s] = feat  ##  b, c, nh, nw
+            del feat
+
+        
+            
+        d = self.init_desc(feat_pyramid[16]) # B,H//16,W//16, D*16
+        local_features = self.head_local_features(feat_pyramid[16])  # B,H//16,W//16,D
+        local_features = local_features.permute(0, 3, 1, 2)
+        local_features = F.pixel_shuffle(local_features, self.patch_size)  # B,d,H,W
+        desc, desc_conf = post_process(local_features, self.desc_mode, self.desc_conf_mode)
+        return {'desc': desc, 'desc_conf': desc_conf, # [B, H, W, D], [B, H, W]
+                }  
+
+
 class FM_conv(nn.Module):
     def __init__(self, desc_dim, desc_mode, desc_conf_mode, patch_size, detach = False):
         super().__init__()
@@ -657,6 +699,8 @@ def head_factory(head_type, net):
         return FM_conv(net.local_feat_dim, net.desc_mode, net.desc_conf_mode, patch_size, detach = net.detach)
     elif head_type == 'fm_ms_conv':
         return MultiScaleFM_conv(net.local_feat_dim, net.desc_mode, net.desc_conf_mode, patch_size, detach = net.detach)
+    elif head_type == 'mlp':
+        return FM_MLP(net.local_feat_dim, net.desc_mode, net.desc_conf_mode, patch_size, detach = net.detach)
     else:
         raise NotImplementedError(
             f"unexpected {head_type=}")

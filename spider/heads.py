@@ -48,13 +48,8 @@ class FM_MLP(nn.Module):
             # feat_pyramid[s] = feat.permute(0, 3, 1, 2).contiguous()  ## b, c, nh, nw
             feat_pyramid[s] = feat  ##  b, c, nh, nw
             del feat
-
-        
-            
-        d = self.init_desc(feat_pyramid[16]) # B,H//16,W//16, D*16
         local_features = self.head_local_features(feat_pyramid[16])  # B,H//16,W//16,D
-        local_features = local_features.permute(0, 3, 1, 2)
-        local_features = F.pixel_shuffle(local_features, self.patch_size)  # B,d,H,W
+        local_features = F.pixel_shuffle(local_features.permute(0, 3, 1, 2), self.patch_size)  # B,d,H,W
         desc, desc_conf = post_process(local_features, self.desc_mode, self.desc_conf_mode)
         return {'desc': desc, 'desc_conf': desc_conf, # [B, H, W, D], [B, H, W]
                 }  

@@ -171,3 +171,42 @@ def coarse_to_fine(h1, w1, h2, w2, imgs_large, kpts1, kpts2, mconf, model, devic
         # Inference and Matching
         kpts1, kpts2, mconf = fine_matching(query_crop_view, map_crop_view, model, device)
     return kpts1, kpts2, mconf
+
+def coarse_to_fine_new(h1, w1, h2, w2, img1, img2, kpts1, kpts2, mconf, model, device):
+    crops1, crops2 = [], []
+    to_orig1, to_orig2 = [], []
+    query_resolution = get_HW_resolution(h1, w1, maxdim=512, patchsize=16)
+    map_resolution = get_HW_resolution(h2, w2, maxdim=512, patchsize=16)
+    img_large1, img_large2 = img1['img'][0].permute(1,2,0), img2['img'][0].permute(1,2,0)
+    for crop_q, crop_b, pair_tag in select_pairs_of_crops(img_large1, img_large2, kpts1.cpu().numpy(),
+                                                                    kpts2.cpu().numpy(),
+                                                                    maxdim=512,
+                                                                    overlap=0.5,
+                                                                    forced_resolution=[query_resolution,
+                                                                                        map_resolution]):
+        c1, trf1 = crop(img_large1, crop_q)
+        c2, trf2 = crop(img_large2, crop_b)
+        crops1.append(c1)
+        crops2.append(c2)
+        to_orig1.append(trf1)
+        to_orig2.append(trf2)
+    if len(crops1) == 0 or len(crops2) == 0:
+        return kpts1, kpts2, mconf
+    else:
+        crops1, crops2 = torch.stack(crops1), torch.stack(crops2)
+        if len(crops1.shape) == 3:
+            crops1, crops2 = crops1[None], crops2[None]
+        to_orig1, to_orig2 = torch.stack(to_orig1), torch.stack(to_orig2)
+        query_crop_view = dict(img=crops1.permute(0, 3, 1, 2),
+                                instance=['1' for _ in range(crops1.shape[0])],
+                                true_shape=torch.from_numpy(np.int32(query_resolution)).unsqueeze(0).repeat(crops1.shape[0], 1),
+                                to_orig=to_orig1)
+        map_crop_view = dict(img=crops2.permute(0, 3, 1, 2),
+                                instance=['2' for _ in range(crops2.shape[0])],
+                                true_shape=torch.from_numpy(np.int32(map_resolution)).unsqueeze(0).repeat(crops2.shape[0], 1),
+                                to_orig=to_orig2)
+        
+
+        # Inference and Matching
+        kpts1, kpts2, mconf = fine_matching(query_crop_view, map_crop_view, model, device)
+    return kpts1, kpts2, mconf

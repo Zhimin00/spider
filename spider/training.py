@@ -173,7 +173,7 @@ def train(args):
     # param_groups = misc.get_parameter_groups(model_without_ddp, args.weight_decay)
     # optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
     param_groups = [
-        {"params": model_without_ddp.cnn.parameters(), "lr": 32 * 5e-6 / 8},
+        # {"params": model_without_ddp.cnn.parameters(), "lr": 32 * 5e-6 / 8},
         {"params": model_without_ddp.downstream_head.parameters(), "lr": 32 * 1e-4 / 8},
     ]
     optimizer = torch.optim.AdamW(param_groups, weight_decay=0.01)

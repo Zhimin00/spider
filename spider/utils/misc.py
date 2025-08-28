@@ -113,6 +113,75 @@ def transpose_to_landscape_warp(head, activate=True):
 
     return wrapper_yes if activate else wrapper_no
 
+def transpose_to_landscape_fmwarp(head, activate=True):
+    """ Predict in the correct aspect-ratio,
+        then transpose the result in landscape 
+        and stack everything back together.
+    """
+    def wrapper_no(feat16_1, feat16_2, true_shape1, true_shape2):
+        B = len(true_shape1)
+        assert true_shape1[0:1].allclose(true_shape1), 'true_shape1 must be all identical'
+        assert true_shape2[0:1].allclose(true_shape2), 'true_shape2 must be all identical'
+        H1, W1 = true_shape1[0].cpu().tolist()
+        H2, W2 = true_shape2[0].cpu().tolist()
+        res = head(feat16_1, feat16_2, (H1, W1), (H2, W2))
+        return res
+
+    def wrapper_yes(feat16_1, feat16_2, true_shape1, true_shape2):
+        B = len(true_shape1)
+        # by definition, the batch is in landscape mode so W >= H
+        H, W = int(true_shape1.min()), int(true_shape1.max())
+
+        height1, width1 = true_shape1.T
+        height2, width2 = true_shape2.T
+        is_land2land = (width1 >= height1) & (width2 >= height2)
+        is_land2port = (width1 >= height1) & (width2 < height2)
+        is_port2land = (width1 < height1) & (width2 >= height2)
+        is_port2port = (width1 < height1) & (width2 < height2)
+
+        # true_shape = true_shape.cpu()
+        if is_land2land.all():
+            return head(feat16_1, feat16_2, (H, W), (H, W))
+        if is_land2port.all():
+            return head(feat16_1, feat16_2, (H, W), (W, H))
+        if is_port2land.all():
+            return transposed_corresps(head(feat16_1, feat16_2, (W, H), (H, W)))
+        if is_port2port.all():
+            return transposed_corresps(head(feat16_1, feat16_2, (W, H), (W, H)))
+
+        # batch is a mix of both portraint & landscape
+        def selout1(ar): return feat16_1[ar]
+        def selout2(ar): return feat16_2[ar]
+
+        cases = [
+            ("land2land", is_land2land, (H, W), (H, W), False),
+            ("land2port", is_land2port, (H, W), (W, H), False),
+            ("port2land", is_port2land, (W, H), (H, W), True),
+            ("port2port", is_port2port, (W, H), (W, H), True),
+        ]
+
+        partial_results = {}
+
+        for name, mask, shape1, shape2, transpose in cases:
+            if mask.any():
+                out1 = selout1(mask)
+                out2 = selout2(mask)
+                head_result = head(out1, out2, shape1, shape2)
+                if transpose:
+                    head_result = transposed_corresps(head_result)
+                partial_results[name] = head_result
+        # allocate and fill final result
+        result = {}
+        template = next(iter(partial_results.values()))
+
+        for k, v in template.items():
+            x = v.new_zeros((B, *v.shape[1:]))
+            for name, mask, *_ in cases:
+                if name in partial_results:
+                    x[mask] = partial_results[name][k]
+            result[k] = x
+        return result
+    return wrapper_yes if activate else wrapper_no
 
 def transpose_to_landscape_fm(head, activate=True):
     """ Predict in the correct aspect-ratio,

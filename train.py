@@ -5,9 +5,10 @@
 # --------------------------------------------------------
 # training executable for MASt3R
 # --------------------------------------------------------
-from spider.model import SPIDER
+from spider.model import SPIDER, SPIDER_FMwarp
 import spider.training
 spider.training.SPIDER = SPIDER
+spider.training.SPIDER_FMwarp = SPIDER_FMwarp
 
 import spider.utils.path_to_dust3r  # noqa
 from dust3r.training import get_args_parser as dust3r_get_args_parser  # noqa

@@ -843,21 +843,21 @@ class TransformerDecoder(nn.Module):
     def scales(self):
         return self._scales.copy()
 
-    def forward(self, gp_posterior, features, old_stuff, new_scale):
-        def get_grid(b, h, w, device):
-            grid = torch.meshgrid(
-                *[
-                    torch.linspace(-1 + 1 / n, 1 - 1 / n, n, device=device)
-                    for n in (b, h, w)
-                ]
-            )
-            grid = torch.stack((grid[2], grid[1]), dim=-1).reshape(b, h, w, 2)
-            return grid
+    def forward(self, gp_posterior, features, old_stuff=None, new_scale=None):
+        # def get_grid(b, h, w, device):
+        #     grid = torch.meshgrid(
+        #         *[
+        #             torch.linspace(-1 + 1 / n, 1 - 1 / n, n, device=device)
+        #             for n in (b, h, w)
+        #         ]
+        #     )
+        #     grid = torch.stack((grid[2], grid[1]), dim=-1).reshape(b, h, w, 2)
+        #     return grid
 
         B, C, H, W = gp_posterior.shape
         x = torch.cat((gp_posterior, features), dim=1)
         B, C, H, W = x.shape
-        grid = get_grid(B, H, W, x.device).reshape(B, H * W, 2)
+        # grid = get_grid(B, H, W, x.device).reshape(B, H * W, 2)
         if self.learned_embeddings:
             pos_enc = (
                 F.interpolate(

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from spider.roma import TransformerDecoder, Block, MemEffAttention, ConvRefiner, Decoder, CosKernel, GP
+from spider.roma import TransformerDecoder, Block, MemEffAttention, ConvRefiner, Decoder, CosKernel, GP, cls_to_flow_refine
 from einops import rearrange
 import pdb
 import spider.utils.path_to_dust3r
@@ -53,6 +53,149 @@ class FM_MLP(nn.Module):
         desc, desc_conf = post_process(local_features, self.desc_mode, self.desc_conf_mode)
         return {'desc': desc, 'desc_conf': desc_conf, # [B, H, W, D], [B, H, W]
                 }  
+
+class FM_desc(nn.Module):
+    def __init__(self, desc_dim, desc_mode, desc_conf_mode, patch_size, hidden_dim_factor = 4, detach=False):
+        super().__init__()
+        self.desc_dim = desc_dim
+        self.desc_mode = desc_mode
+        self.desc_conf_mode = desc_conf_mode
+        self.patch_size = patch_size
+        self.detach = detach
+        
+        
+        self.head_local_features = Mlp(in_features=1024 + 768,
+                            hidden_features=int(hidden_dim_factor * (1024 + 768)),
+                            out_features=(self.desc_dim + 1)*self.patch_size ** 2)
+
+    def forward(self, cnn_feats, true_shape, upsample = False, low_desc = None, low_certainty = None):  # dict: {"16": f16, "8": f8, "4": f4, "2": f2, "1": f1]
+        H, W = true_shape
+        if upsample:
+            scales = [1, 2, 4, 8]
+        else:
+            scales = [1, 2, 4, 8, 16]
+        N_Hs = [H // s if s != 16 else H // self.patch_size for s in scales]
+        N_Ws = [W // s if s != 16 else W // self.patch_size for s in scales]
+
+        feat_pyramid = {}
+        for i, s in enumerate(scales):
+            nh, nw = N_Hs[i], N_Ws[i]
+            feat = rearrange(cnn_feats[i], 'b (nh nw) c -> b nh nw c', nh=nh, nw=nw)
+            # feat_pyramid[s] = feat.permute(0, 3, 1, 2).contiguous()  ## b, c, nh, nw
+            feat_pyramid[s] = feat  ##  b, c, nh, nw
+            del feat
+        local_features = self.head_local_features(feat_pyramid[16])  # B,H//16,W//16,D
+        local_features = F.pixel_shuffle(local_features.permute(0, 3, 1, 2), self.patch_size)  # B,d,H,W
+        desc, desc_conf = post_process(local_features, self.desc_mode, self.desc_conf_mode)
+        return {'desc': desc, 'desc_conf': desc_conf, # [B, H, W, D], [B, H, W]
+                }  
+
+class FMwarp(nn.Module): 
+    def __init__(self, idim, desc_dim, patch_size):
+        super().__init__()
+        self.patch_size = patch_size
+        self.desc_dim = desc_dim
+        self.head_local_features1 = Mlp(in_features=idim,
+                                       hidden_features=int(4 * idim),
+                                       out_features=(self.desc_dim + 1) * self.patch_size**2)
+        self.head_local_features2 = Mlp(in_features=idim,
+                                       hidden_features=int(4 * idim),
+                                       out_features=(self.desc_dim + 1) * self.patch_size**2)
+
+
+        self.proj = nn.Sequential(nn.Conv2d(6400, 1024, 1, 1), nn.BatchNorm2d(1024))
+
+        gp_dim = 1024
+        feat_dim = 1024
+
+        self.gp = GP(
+            CosKernel,
+            T=0.2,
+            learn_temperature=False,
+            only_attention=False,
+            gp_dim=gp_dim,
+            basis="fourier",
+            no_cov=True,
+        )
+        displacement_emb_dim = 128
+        decoder_dim = gp_dim + feat_dim
+        cls_to_coord_res = 64
+        self.coordinate_decoder = TransformerDecoder(nn.Sequential(*[Block(decoder_dim, 8, attn_class=MemEffAttention) for _ in range(5)]), 
+            decoder_dim, 
+            cls_to_coord_res**2 + 1,
+            is_classifier=True,
+            pos_enc = False,)
+
+        self.convrefiner = ConvRefiner(
+                2 * gp_dim + displacement_emb_dim+(2*7+1)**2,
+                2 * gp_dim + displacement_emb_dim+(2*7+1)**2,
+                2 + 1,
+                kernel_size=5,
+                dw=True,
+                hidden_blocks=5,
+                displacement_emb="linear",
+                displacement_emb_dim=128,
+                local_corr_radius = 7,
+                corr_in_other = True,
+                disable_local_corr_grad = True,
+                bn_momentum = 0.01,
+            )
+        self.refine_init = 4
+
+
+    def get_placeholder_flow(self, b, h, w, device):
+        coarse_coords = torch.meshgrid(
+            (
+                torch.linspace(-1 + 1 / h, 1 - 1 / h, h, device=device),
+                torch.linspace(-1 + 1 / w, 1 - 1 / w, w, device=device),
+            ),
+            indexing = 'ij'
+        )
+        coarse_coords = torch.stack((coarse_coords[1], coarse_coords[0]), dim=-1)[
+            None
+        ].expand(b, h, w, 2)
+        coarse_coords = rearrange(coarse_coords, "b h w d -> b d h w")
+        return coarse_coords
+
+    def forward(self, f1, f2, shape1, shape2):
+        H1, W1 = shape1
+        B1, S, D = f1.shape
+        local_features1 = self.head_local_features1(f1)  # B,S,D
+        local_features1 = local_features1.transpose(-1, -2).view(B1, -1, H1 // self.patch_size, W1 // self.patch_size)
+        # local_features1 = F.pixel_shuffle(local_features1, self.patch_size)  # B,d,H,W
+
+        H2, W2 = shape2
+        B2, S, D = f2.shape
+        local_features2 = self.head_local_features2(f2)  # B,S,D
+        local_features2 = local_features2.transpose(-1, -2).view(B2, -1, H2 // self.patch_size, W2 // self.patch_size)
+        # local_features2 = F.pixel_shuffle(local_features2, self.patch_size)  # B,d,H,W
+
+
+        device = f1.device
+        corresps = {}
+        
+        certainty = 0.0
+        displacement = 0.0
+        corresps = {}
+               
+        f1_s, f2_s = self.proj(local_features1), self.proj(local_features2)
+        gp_posterior = self.gp(f1_s, f2_s)
+        gm_warp_or_cls, certainty, _ = self.embedding_decoder(gp_posterior, f1_s)
+
+        flow = cls_to_flow_refine(gm_warp_or_cls).permute(0,3,1,2)
+        corresps.update({"gm_cls": gm_warp_or_cls,"gm_certainty": certainty,})
+        corresps.update({"flow_pre_delta": flow})
+        
+        delta_flow, delta_certainty = self.conv_refiner(f1_s, f2_s, flow, logits = certainty)                    
+        corresps.update({"delta_flow": delta_flow,})
+        displacement = torch.stack((delta_flow[:, 0].float() / (self.refine_init * W1),
+                                    delta_flow[:, 1].float() / (self.refine_init * H1),),dim=1,)
+        flow = flow + displacement
+        certainty = (certainty + delta_certainty)  # predict both certainty and displacement
+        corresps.update({
+            "certainty": certainty,
+            "flow": flow,             
+        })
 
 
 class FM_conv(nn.Module):
@@ -260,12 +403,14 @@ class MultiScaleFM(nn.Module):
         
         if upsample:
             d = torch.cat([low_desc, low_certainty.unsqueeze(-1)], dim=-1)
+            d = d / d.norm(dim=-1, keepdim=True)
             d = d.permute(0, 3, 1, 2)
             desc_16 = desc_conf_16 = None
         else:
             f16 = self.proj16(feat_pyramid[16])
             d = self.init_desc(f16)
             d = self.refine16(torch.cat([d, f16], dim=1)) + d
+            d = d / d.norm(dim=1, keepdim=True)
             desc_16, desc_conf_16 = post_process(d, self.desc_mode, self.desc_conf_mode)
             
         d = F.interpolate(
@@ -273,11 +418,12 @@ class MultiScaleFM(nn.Module):
                 size=(N_Hs[3], N_Ws[3]),
                 mode="bilinear",
             ) # [B, D+1, H//8, W//8]
-        
+        d = d / d.norm(dim=1, keepdim=True)
         if self.detach:
             d = d.detach()
 
         d = self.refine8(torch.cat([d, self.proj8(feat_pyramid[8])], dim=1)) + d # [B, D+1, H//8, W//8]
+        d = d / d.norm(dim=1, keepdim=True)
         desc_8, desc_conf_8 = post_process(d, self.desc_mode, self.desc_conf_mode)
 
         d =  F.interpolate(
@@ -285,10 +431,12 @@ class MultiScaleFM(nn.Module):
                     size=(N_Hs[2], N_Ws[2]),
                     mode="bilinear",
                 )  # [B, D+1, H//4, W//4]
+        d = d / d.norm(dim=1, keepdim=True)
         if self.detach:
             d = d.detach()
         
         d = self.refine4(torch.cat([d, self.proj4(feat_pyramid[4])], dim=1)) + d # [B, D+1, H//4, W//4]
+        d = d / d.norm(dim=1, keepdim=True)
         desc_4, desc_conf_4 = post_process(d, self.desc_mode, self.desc_conf_mode)
 
         d =  F.interpolate(
@@ -296,10 +444,12 @@ class MultiScaleFM(nn.Module):
                     size=(N_Hs[1], N_Ws[1]),
                     mode="bilinear",
                 )  # [B, D+1, H//2, W//2]
+        d = d / d.norm(dim=1, keepdim=True)
         if self.detach:
             d = d.detach()
 
         d = self.refine2(torch.cat([d, self.proj2(feat_pyramid[2])], dim=1)) + d # [B, D+1, H//2, W//2]
+        d = d / d.norm(dim=1, keepdim=True)
         desc_2, desc_conf_2 = post_process(d, self.desc_mode, self.desc_conf_mode)
         
         d =  F.interpolate(
@@ -307,18 +457,20 @@ class MultiScaleFM(nn.Module):
                     size=(N_Hs[0], N_Ws[0]),
                     mode="bilinear",
                 )  # [B, D+1, H//1, W//1]
+        d = d / d.norm(dim=1, keepdim=True)
         if self.detach:
             d = d.detach()
 
         d = self.refine1(torch.cat([d, self.proj1(feat_pyramid[1])], dim=1)) + d # [B, D+1, H, W]
-        
+        d = d / d.norm(dim=1, keepdim=True)
+        desc_before, desc_conf_before = d[..., :-1], d[..., -1]
         desc, desc_conf = post_process(d, self.desc_mode, self.desc_conf_mode)
-
         return {'desc': desc, 'desc_conf': desc_conf, # [B, H, W, D], [B, H, W]
                 'desc_16': desc_16, 'desc_conf_16': desc_conf_16,
                 'desc_8': desc_8, 'desc_conf_8': desc_conf_8,
                 'desc_4': desc_4, 'desc_conf_4': desc_conf_4,
                 'desc_2': desc_2, 'desc_conf_2': desc_conf_2,
+                'desc_before': desc_before, 'desc_conf_before': desc_conf_before,
                 }  
 
 
@@ -695,7 +847,14 @@ def head_factory(head_type, net):
     elif head_type == 'fm_ms_conv':
         return MultiScaleFM_conv(net.local_feat_dim, net.desc_mode, net.desc_conf_mode, patch_size, detach = net.detach)
     elif head_type == 'mlp':
+        ## train mlp from scratch
         return FM_MLP(net.local_feat_dim, net.desc_mode, net.desc_conf_mode, patch_size, detach = net.detach)
+    elif head_type == 'desc':
+        ## load pretrained weights
+        return FM_desc(net.local_feat_dim, net.desc_mode, net.desc_conf_mode, patch_size, detach = net.detach)
+    elif head_type == 'descwarp':
+        return FMwarp(net.enc_embed_dim + net.dec_embed_dim, net.local_feat_dim, patch_size)
+
     else:
         raise NotImplementedError(
             f"unexpected {head_type=}")

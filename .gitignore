@@ -132,3 +132,4 @@ dmypy.json
 mast3r_results/
 mast3r/
 output/
+model_weights/

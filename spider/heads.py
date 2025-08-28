@@ -465,7 +465,7 @@ class MultiScaleFM(nn.Module):
         
         desc, desc_conf = post_process(d, self.desc_mode, self.desc_conf_mode)
         d = d.permute(0, 2, 3, 1)
-        desc_before, desc_conf_before = d[:, :-1], d[..., -1]
+        desc_before, desc_conf_before = d[..., :-1], d[..., -1]
         return {'desc': desc, 'desc_conf': desc_conf, # [B, H, W, D], [B, H, W]
                 'desc_16': desc_16, 'desc_conf_16': desc_conf_16,
                 'desc_8': desc_8, 'desc_conf_8': desc_conf_8,

@@ -412,7 +412,6 @@ class MultiScaleFM(nn.Module):
             d = self.refine16(torch.cat([d, f16], dim=1)) + d
             d = d / d.norm(dim=1, keepdim=True)
             desc_16, desc_conf_16 = post_process(d, self.desc_mode, self.desc_conf_mode)
-            
         d = F.interpolate(
                 d,
                 size=(N_Hs[3], N_Ws[3]),
@@ -463,8 +462,10 @@ class MultiScaleFM(nn.Module):
 
         d = self.refine1(torch.cat([d, self.proj1(feat_pyramid[1])], dim=1)) + d # [B, D+1, H, W]
         d = d / d.norm(dim=1, keepdim=True)
-        desc_before, desc_conf_before = d[..., :-1], d[..., -1]
+        
         desc, desc_conf = post_process(d, self.desc_mode, self.desc_conf_mode)
+        d = d.permute(0, 2, 3, 1)
+        desc_before, desc_conf_before = d[:, :-1], d[..., -1]
         return {'desc': desc, 'desc_conf': desc_conf, # [B, H, W, D], [B, H, W]
                 'desc_16': desc_16, 'desc_conf_16': desc_conf_16,
                 'desc_8': desc_8, 'desc_conf_8': desc_conf_8,

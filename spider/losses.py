@@ -279,7 +279,135 @@ class PCK(nn.Module):
         return epe, dict(epe=epe, pck1 = pck_1, pck3 = pck_3, pck5 = pck_5)
 
    
+class PCK_fmwarp(nn.Module):
+    def __init__(self, attenuate_cert=False):
+        super().__init__()
+        self.attenuate_cert = attenuate_cert
+    
+    def match(self, corresps):
+        im_A_to_im_B = corresps["flow"] 
+        b, _, h, w = corresps["certainty"].shape
+        low_res_certainty = F.interpolate(
+                    corresps["gm_certainty"], size=(h, w), align_corners=False, mode="bilinear"
+                )
+        cert_clamp = 0
+        factor = 0.5
+        low_res_certainty = factor * low_res_certainty * (low_res_certainty < cert_clamp)
+        certainty = corresps["certainty"] - (low_res_certainty if self.attenuate_cert else 0)
+        im_A_to_im_B = im_A_to_im_B.permute(0, 2, 3, 1)
+        device = im_A_to_im_B.device
+        # Create im_A meshgrid
+        im_A_coords = torch.meshgrid(
+            (
+                torch.linspace(-1 + 1 / h, 1 - 1 / h, h, device=device),
+                torch.linspace(-1 + 1 / w, 1 - 1 / w, w, device=device),
+            ),
+            indexing='ij'
+        )
+        im_A_coords = torch.stack((im_A_coords[1], im_A_coords[0]))
+        im_A_coords = im_A_coords[None].expand(b, 2, h, w)
+        certainty = certainty.sigmoid()  # logits -> probs
+        im_A_coords = im_A_coords.permute(0, 2, 3, 1)
+        if (im_A_to_im_B.abs() > 1).any() and True:
+            wrong = (im_A_to_im_B.abs() > 1).sum(dim=-1) > 0
+            certainty[wrong[:, None]] = 0
+        im_A_to_im_B = torch.clamp(im_A_to_im_B, -1, 1)
+        warp = torch.cat((im_A_coords, im_A_to_im_B), dim=-1)
+        return (
+                warp,
+                certainty[:, 0]
+            )
+        
+    def geometric_dist(self, depth1, depth2, T_1to2, K1, K2, dense_matches, is_2port, true_h2, true_w2):
+        b, h1, w1, d = dense_matches.shape
+        h2, w2 = depth2.shape[1:3]
+        device = depth2.device
+        true_w2 = true_w2.to(device)[:, None, None]
+        true_h2 = true_h2.to(device)[:, None, None]
+        with torch.no_grad():
+            x1 = dense_matches[..., :2].reshape(b, h1 * w1, 2)
+            mask, x2 = warp_kpts(
+                x1.double(),
+                depth1.double(),
+                depth2.double(),
+                T_1to2.double(),
+                K1.double(),
+                K2.double(),
+            )
+            x2 = torch.stack(
+                (w2 * (x2[..., 0] + 1) / 2, h2 * (x2[..., 1] + 1) / 2), dim=-1
+            )
+            x2[is_2port] = x2[is_2port][..., [1,0]]
+            prob = mask.float().reshape(b, h1, w1)
+        x2_hat = dense_matches[..., 2:]
+        x2_hat = torch.stack(
+            (true_w2 * (x2_hat[..., 0] + 1) / 2, true_h2 * (x2_hat[..., 1] + 1) / 2), dim=-1
+        )
+        gd = (x2_hat - x2.reshape(b, h1, w1, 2)).norm(dim=-1)
+        gd = gd[prob == 1]
+        pck_1 = (gd < 1.0).float().mean()
+        pck_3 = (gd < 3.0).float().mean()
+        pck_5 = (gd < 5.0).float().mean()
+        epe = gd.float().mean()
+        return epe, pck_1, pck_3, pck_5, prob
 
+    def forward(self, view1, view2, corresps):
+        img2 = view2['img']
+        B, THREE, h2, w2 = img2.shape
+        # Recover true_shape when available, otherwise assume that the img shape is the true one
+        shape2 = view2.get('true_shape', torch.tensor(img2.shape[-2:])[None].repeat(B, 1))
+        height2, width2 = shape2.T
+        is_2port = (width2 < height2)
+        T1 = view1['camera_pose']
+        T2 = view2['camera_pose']
+        T_1to2 = torch.matmul(torch.linalg.inv(T2), T1)
+        K1 = opencv_to_colmap_intrinsics(view1['camera_intrinsics'])
+        K2 = opencv_to_colmap_intrinsics(view2['camera_intrinsics'])
+        # K1 = view1['camera_intrinsics']
+        # K2 = view2['camera_intrinsics']
+        # pdb.set_trace()
+        im_A_to_im_B = corresps["flow"] 
+        _, _, h, w = im_A_to_im_B.shape
+        gt_warp, gt_prob = get_gt_warp(                
+                view1['depthmap'],
+                view2['depthmap'],
+                T_1to2,
+                K1,
+                K2,
+                H=h,
+                W=w,
+            )
+        x2 = gt_warp.float()
+        prob = gt_prob
+        
+        im_A_to_im_B = im_A_to_im_B.permute(0, 2, 3, 1)
+        im_A_to_im_B[is_2port] = im_A_to_im_B[is_2port][..., [1,0]]
+
+        x2_hat = torch.clamp(im_A_to_im_B, -1, 1)
+        
+        x2 = torch.stack(
+                (w2 * (x2[..., 0] + 1) / 2, h2 * (x2[..., 1] + 1) / 2), dim=-1
+            )
+        x2_hat = torch.stack(
+                (w2 * (x2_hat[..., 0] + 1) / 2, h2 * (x2_hat[..., 1] + 1) / 2), dim=-1
+            )  
+
+        gd = (x2_hat - x2).norm(dim=-1)
+        gd = gd[prob == 1]
+        pck_1 = (gd < 1.0).float().mean()
+        pck_3 = (gd < 3.0).float().mean()
+        pck_5 = (gd < 5.0).float().mean()
+        epe = gd.float().mean()  
+        # pdb.set_trace()
+        # matches, certainty = self.match(corresps)
+
+        # epe, pck_1, pck_3, pck_5, prob = self.geometric_dist(
+        #      view1['depthmap'], view2['depthmap'], T_1to2, K1, K2, matches, is_2port, height2, width2
+        # )
+       
+        return epe, dict(epe=epe, pck1 = pck_1, pck3 = pck_3, pck5 = pck_5)
+
+   
 class RobustLosses(nn.Module):
     def __init__(
         self,
@@ -553,29 +681,44 @@ class RobustLosses_fm(nn.Module):
         # scale_weights due to differences in scale for regression gradients and classification gradients
         scale_weights = {1:1, 2:1, 4:1, 8:1, 16:1}
         details = {}
-        scale = 1
-        scale_certainty, flow_pre_delta, delta_cls, offset_scale, scale_gm_cls, scale_gm_certainty, flow, scale_gm_flow = (
-            corresps["certainty"],
-            corresps.get("flow_pre_delta"),
-            corresps.get("delta_cls"),
-            corresps.get("offset_scale"),
-            corresps.get("gm_cls"),
-            corresps.get("gm_certainty"),
+        
+        flow_pre_delta, scale_gm_cls, scale_gm_certainty, flow, certainty = (
+            corresps["flow_pre_delta"],
+            corresps["gm_cls"],
+            corresps["gm_certainty"],
             corresps["flow"],
-            corresps.get("gm_flow"),
+            corresps["certainty"],
             )
-        if flow_pre_delta is not None:
-            flow_pre_delta = rearrange(flow_pre_delta, "b d h w -> b h w d")
-            b, h, w, d = flow_pre_delta.shape
-        else:
-            # _ = 1
-            b, _, h, w = scale_certainty.shape
+        
         T1 = view1['camera_pose']
         T2 = view2['camera_pose']
         T_1to2 = torch.matmul(torch.linalg.inv(T2), T1)
         K1 = opencv_to_colmap_intrinsics(view1['camera_intrinsics'])
         K2 = opencv_to_colmap_intrinsics(view2['camera_intrinsics'])
-        # pdb.set_trace()
+        
+        scale = 16
+        _, _, h16, w16 = flow_pre_delta.shape
+        gt_warp16, gt_prob16 = get_gt_warp(                
+            view1['depthmap'],
+            view2['depthmap'],
+            T_1to2,
+            K1,
+            K2,
+            H=h16,
+            W=w16,
+        )
+        gt_warp16[is_2port] = gt_warp16[is_2port][..., [1,0]]
+        x2_16 = gt_warp16.float()
+        prob = gt_prob16
+        
+        gm_cls_losses = self.gm_cls_loss(x2_16, prob, scale_gm_cls, scale_gm_certainty, scale)
+        gm_loss = self.ce_weight * gm_cls_losses[f"gm_certainty_loss_{scale}"] + gm_cls_losses[f"gm_cls_loss_{scale}"]
+        tot_loss = tot_loss + scale_weights[scale] * gm_loss
+        details.update(gm_cls_losses)
+        prev_epe = (flow_pre_delta.permute(0,2,3,1) - x2_16).norm(dim=-1).detach()
+
+        scale = 1
+        _, _, h, w = certainty.shape
         gt_warp, gt_prob = get_gt_warp(                
             view1['depthmap'],
             view2['depthmap'],
@@ -585,32 +728,13 @@ class RobustLosses_fm(nn.Module):
             H=h,
             W=w,
         )
-        gt_warp[is_2port] = gt_warp[is_2port][..., [1,0]]
-
-
         x2 = gt_warp.float()
         prob = gt_prob
-
-        if scale_gm_cls is not None:
-            gm_cls_losses = self.gm_cls_loss(x2, prob, scale_gm_cls, scale_gm_certainty, scale)
-            gm_loss = self.ce_weight * gm_cls_losses[f"gm_certainty_loss_{scale}"] + gm_cls_losses[f"gm_cls_loss_{scale}"]
-            tot_loss = tot_loss + scale_weights[scale] * gm_loss
-            details.update(gm_cls_losses)
-        elif scale_gm_flow is not None:
-            gm_flow_losses = self.regression_loss(x2, prob, scale_gm_flow, scale_gm_certainty, scale, mode = "gm")
-            gm_loss = self.ce_weight * gm_flow_losses[f"gm_certainty_loss_{scale}"] + gm_flow_losses[f"gm_regression_loss_{scale}"]
-            tot_loss = tot_loss + scale_weights[scale] * gm_loss
-            details.update(gm_flow_losses)
-        
-        if delta_cls is not None:
-            delta_cls_losses = self.delta_cls_loss(x2, prob, flow_pre_delta, delta_cls, scale_certainty, scale, offset_scale)
-            delta_cls_loss = self.ce_weight * delta_cls_losses[f"delta_certainty_loss_{scale}"] + delta_cls_losses[f"delta_cls_loss_{scale}"]
-            tot_loss = tot_loss + scale_weights[scale] * delta_cls_loss
-            details.update(delta_cls_losses)
-        else:
-            delta_regression_losses = self.regression_loss(x2, prob, flow, scale_certainty, scale)
-            reg_loss = self.ce_weight * delta_regression_losses[f"delta_certainty_loss_{scale}"] + delta_regression_losses[f"delta_regression_loss_{scale}"]
-            tot_loss = tot_loss + scale_weights[scale] * reg_loss
-            details.update(delta_regression_losses)
+        prob = prob * (F.interpolate(prev_epe[:, None], size=(h, w), mode="nearest-exact")[:, 0]
+                        < (2 / 512) * (self.local_dist[scale] * scale))
+        delta_regression_losses = self.regression_loss(x2, prob, flow, certainty, scale)
+        reg_loss = self.ce_weight * delta_regression_losses[f"delta_certainty_loss_{scale}"] + delta_regression_losses[f"delta_regression_loss_{scale}"]
+        tot_loss = tot_loss + scale_weights[scale] * reg_loss
+        details.update(delta_regression_losses)
 
         return tot_loss, dict(warp_loss = float(tot_loss), **details)

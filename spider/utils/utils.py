@@ -164,6 +164,12 @@ def match_upsample(corresps, low_corresps, attenuate_cert=True, inverse=False):
     warp, certainty = match_single(im_A_to_im_B=im_A_to_im_Bs, certainty=certaintys, certainty_s16=certainty_s16s, attenuate_cert=attenuate_cert, inverse=inverse)
     return warp, certainty
 
+def fmwarp_match(corresps, attenuate_cert=True, inverse=False):
+    im_A_to_im_Bs = corresps["flow"] 
+    certaintys = corresps["certainty"]
+    certainty_s16s= corresps["gm_certainty"]
+    warp, certainty = match_single(im_A_to_im_B=im_A_to_im_Bs, certainty=certaintys, certainty_s16=certainty_s16s, attenuate_cert=attenuate_cert, inverse=inverse)
+    return warp, certainty
 
 def match_symmetric(corresps, attenuate_cert=True):
     finest_scale = 1

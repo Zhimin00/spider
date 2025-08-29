@@ -117,7 +117,7 @@ class FMwarp(nn.Module):
             basis="fourier",
             no_cov=True,
         )
-        displacement_emb_dim = 128
+        displacement_emb_dim = 6
         decoder_dim = gp_dim + feat_dim
         cls_to_coord_res = 64
         self.coordinate_decoder = TransformerDecoder(nn.Sequential(*[Block(decoder_dim, 8, attn_class=MemEffAttention) for _ in range(5)]), 
@@ -126,16 +126,16 @@ class FMwarp(nn.Module):
             is_classifier=True,
             pos_enc = False,)
 
-        self.convrefiner = ConvRefiner(
-                2 * gp_dim + displacement_emb_dim+(2*7+1)**2,
-                2 * gp_dim + displacement_emb_dim+(2*7+1)**2,
+        self.conv_refiner = ConvRefiner(
+                2 * 25 + displacement_emb_dim+(2*1+1)**2,
+                2 * 25 + displacement_emb_dim+(2*1+1)**2,
                 2 + 1,
                 kernel_size=5,
                 dw=True,
                 hidden_blocks=5,
                 displacement_emb="linear",
-                displacement_emb_dim=128,
-                local_corr_radius = 7,
+                displacement_emb_dim=displacement_emb_dim,
+                local_corr_radius = 1,
                 corr_in_other = True,
                 disable_local_corr_grad = True,
                 bn_momentum = 0.01,
@@ -162,40 +162,40 @@ class FMwarp(nn.Module):
         B1, S, D = f1.shape
         local_features1 = self.head_local_features1(f1)  # B,S,D
         local_features1 = local_features1.transpose(-1, -2).view(B1, -1, H1 // self.patch_size, W1 // self.patch_size)
-        # local_features1 = F.pixel_shuffle(local_features1, self.patch_size)  # B,d,H,W
+        f1_1 = F.pixel_shuffle(local_features1, self.patch_size)  # B,d,H,W
 
         H2, W2 = shape2
         B2, S, D = f2.shape
         local_features2 = self.head_local_features2(f2)  # B,S,D
         local_features2 = local_features2.transpose(-1, -2).view(B2, -1, H2 // self.patch_size, W2 // self.patch_size)
-        # local_features2 = F.pixel_shuffle(local_features2, self.patch_size)  # B,d,H,W
+        f2_1 = F.pixel_shuffle(local_features2, self.patch_size)  # B,d,H,W
 
-
-        device = f1.device
-        corresps = {}
-        
         certainty = 0.0
         displacement = 0.0
         corresps = {}
                
         f1_s, f2_s = self.proj(local_features1), self.proj(local_features2)
         gp_posterior = self.gp(f1_s, f2_s)
-        gm_warp_or_cls, certainty, _ = self.embedding_decoder(gp_posterior, f1_s)
+        gm_warp_or_cls, certainty, _ = self.coordinate_decoder(gp_posterior, f1_s)
 
         flow = cls_to_flow_refine(gm_warp_or_cls).permute(0,3,1,2)
         corresps.update({"gm_cls": gm_warp_or_cls,"gm_certainty": certainty,})
-        corresps.update({"flow_pre_delta": flow})
-        
-        delta_flow, delta_certainty = self.conv_refiner(f1_s, f2_s, flow, logits = certainty)                    
+        corresps.update({"flow_pre_delta": flow}) #b, 2, h//16, w//16
+        flow = F.interpolate(flow, size=(H1, W1), mode="bilinear",)
+        certainty = F.interpolate(certainty, size=(H1, W1), mode="bilinear",)
+        flow = flow.detach()
+        certainty = certainty.detach()
+        delta_flow, delta_certainty = self.conv_refiner(f1_1, f2_1, flow, logits = certainty)                    
         corresps.update({"delta_flow": delta_flow,})
         displacement = torch.stack((delta_flow[:, 0].float() / (self.refine_init * W1),
                                     delta_flow[:, 1].float() / (self.refine_init * H1),),dim=1,)
-        flow = flow + displacement
-        certainty = (certainty + delta_certainty)  # predict both certainty and displacement
+        flow = flow + displacement #b, h, w, 2
+        certainty = (certainty + delta_certainty)  # predict both certainty and displacement # b, h, w
         corresps.update({
             "certainty": certainty,
             "flow": flow,             
         })
+        return corresps
 
 
 class FM_conv(nn.Module):
@@ -305,24 +305,28 @@ class MultiScaleFM_conv(nn.Module):
         desc_16, desc_conf_16 = post_process(pred16, self.desc_mode, self.desc_conf_mode)
 
         f16_up = F.interpolate(f16, size=(N_Hs[3], N_Ws[3]), mode="bilinear")
+        f16_up = f16_up.detach()
         f8_up = self.up8(torch.cat([f8, f16_up], dim=1))
         pred8 = self.pred8(f8_up) #b, (D+1)*64, h//8, w//8
         pred8 = F.pixel_shuffle(pred8, 8) #b, D+1, h, w
         desc_8, desc_conf_8 = post_process(pred8, self.desc_mode, self.desc_conf_mode)
 
         f8_up = F.interpolate(f8_up, size=(N_Hs[2], N_Ws[2]), mode="bilinear")
+        f8_up = f8_up.detach()
         f4_up = self.up4(torch.cat([f4, f8_up], dim=1))
         pred4 = self.pred4(f4_up) #b, (D+1)*16, h//4, w//4
         pred4 = F.pixel_shuffle(pred4, 4) #b, D+1, h, w
         desc_4, desc_conf_4 = post_process(pred4, self.desc_mode, self.desc_conf_mode)
 
         f4_up = F.interpolate(f4_up, size=(N_Hs[1], N_Ws[1]), mode="bilinear")
+        f4_up = f4_up.detach()
         f2_up = self.up2(torch.cat([f2, f4_up], dim=1))
         pred2 = self.pred2(f2_up) #b, (D+1)*4, h//2, w//2
         pred2 = F.pixel_shuffle(pred2, 2) #b, D+1, h, w
         desc_2, desc_conf_2 = post_process(pred2, self.desc_mode, self.desc_conf_mode)
 
         f2_up = F.interpolate(f4_up, size=(N_Hs[0], N_Ws[0]), mode="bilinear")
+        f2_up = f2_up.detach()
         f1_up = self.up1(torch.cat([f1, f2_up], dim=1))
        
         pred1 = self.pred2(f1_up) #b, D+1, h//1, w//1
@@ -704,6 +708,63 @@ class WarpHead(nn.Module):
                                 scale_factor=scale_factor)
         return corresps
 
+class FMWarpHead(nn.Module):
+    def __init__(
+            self,
+            idim,
+            decoder,
+            patch_size
+    ):
+        super().__init__()
+        self.decoder = decoder
+        self.patch_size = patch_size
+        self.head_local_features1 = Mlp(in_features=idim,
+                                       hidden_features=int(4 * idim),
+                                       out_features=(self.desc_dim + 1) * self.patch_size**2)
+        self.head_local_features2 = Mlp(in_features=idim,
+                                       hidden_features=int(4 * idim),
+                                       out_features=(self.desc_dim + 1) * self.patch_size**2)
+
+
+    def forward(self, cnn_feats1, cnn_feats2, true_shape1, true_shape2, upsample = False, scale_factor = 1, finest_corresps=None):
+        feat1_pyramid = {}
+        H1, W1 = true_shape1[-2:]
+        if upsample:
+            scales = [1, 2, 4, 8]
+        else:
+            scales = [1, 2, 4, 8, 16]
+        N_Hs1 = [H1 // s if s != 16 else H1 // self.patch_size for s in scales]
+        N_Ws1 = [W1 // s if s != 16 else W1 // self.patch_size for s in scales]
+        
+        for i, s in enumerate(scales):
+            nh, nw = N_Hs1[i], N_Ws1[i]
+            if s ==16: 
+                feat = self.head_local_features1(cnn_feats1[i])
+                feat = rearrange(feat, 'b (nh nw) c -> b c nh nw', nh=nh, nw=nw)
+            else:
+                feat = rearrange(cnn_feats1[i], 'b (nh nw) c -> b c nh nw', nh=nh, nw=nw)
+            feat1_pyramid[s] = feat.contiguous()  ## b, c, nh, nw
+            del feat
+        feat2_pyramid = {}
+        H2, W2 = true_shape2[-2:]
+        N_Hs2 = [H2 // s if s != 16 else H2 // self.patch_size for s in scales]
+        N_Ws2 = [W2 // s if s != 16 else W2 // self.patch_size for s in scales]
+        for i, s in enumerate(scales):
+            nh, nw = N_Hs2[i], N_Ws2[i]
+            if s ==16: 
+                feat = self.head_local_features2(cnn_feats2[i])
+                feat = rearrange(feat, 'b (nh nw) c -> b c nh nw', nh=nh, nw=nw)
+            else:
+                feat = rearrange(cnn_feats2[i], 'b (nh nw) c -> b c nh nw', nh=nh, nw=nw)
+            feat2_pyramid[s] = feat.contiguous()
+            del feat
+        corresps = self.decoder(feat1_pyramid, 
+                                feat2_pyramid, 
+                                upsample = upsample, 
+                                **(finest_corresps if finest_corresps else {}),
+                                scale_factor=scale_factor)
+        return corresps
+    
 ## warp or linear
 def head_factory(head_type, net):
     patch_size = net.patch_embed.patch_size
@@ -838,7 +899,132 @@ def head_factory(head_type, net):
                         displacement_dropout_p = displacement_dropout_p,
                         gm_warp_dropout_p = gm_warp_dropout_p)
         return WarpHead(decoder, patch_size)
-    
+    elif head_type == 'fmwarp':
+        gp_dim = 512
+        feat_dim = 512
+        decoder_dim = gp_dim + feat_dim
+        cls_to_coord_res = 64
+        coordinate_decoder = TransformerDecoder(nn.Sequential(*[Block(decoder_dim, 8, attn_class=MemEffAttention) for _ in range(5)]), 
+        decoder_dim, 
+        cls_to_coord_res**2 + 1,
+        is_classifier=True,
+        pos_enc = False,)
+
+        dw = True
+        hidden_blocks = 8
+        kernel_size = 5
+        displacement_emb = "linear"
+        disable_local_corr_grad = True
+
+        conv_refiner = nn.ModuleDict(
+        {
+            "16": ConvRefiner(
+                2 * 512+128+(2*7+1)**2,
+                2 * 512+128+(2*7+1)**2,
+                2 + 1,
+                kernel_size=kernel_size,
+                dw=dw,
+                hidden_blocks=hidden_blocks,
+                displacement_emb=displacement_emb,
+                displacement_emb_dim=128,
+                local_corr_radius = 7,
+                corr_in_other = True,
+                disable_local_corr_grad = disable_local_corr_grad,
+                bn_momentum = 0.01,
+            ),
+            "8": ConvRefiner(
+                2 * 512+64+(2*3+1)**2,
+                2 * 512+64+(2*3+1)**2,
+                2 + 1,
+                kernel_size=kernel_size,
+                dw=dw,
+                hidden_blocks=hidden_blocks,
+                displacement_emb=displacement_emb,
+                displacement_emb_dim=64,
+                local_corr_radius = 3,
+                corr_in_other = True,
+                disable_local_corr_grad = disable_local_corr_grad,
+                bn_momentum = 0.01,
+            ),
+            "4": ConvRefiner(
+                2 * 256+32+(2*2+1)**2,
+                2 * 256+32+(2*2+1)**2,
+                2 + 1,
+                kernel_size=kernel_size,
+                dw=dw,
+                hidden_blocks=hidden_blocks,
+                displacement_emb=displacement_emb,
+                displacement_emb_dim=32,
+                local_corr_radius = 2,
+                corr_in_other = True,
+                disable_local_corr_grad = disable_local_corr_grad,
+                bn_momentum = 0.01,
+            ),
+            "2": ConvRefiner(
+                2 * 64+16,
+                128+16,
+                2 + 1,
+                kernel_size=kernel_size,
+                dw=dw,
+                hidden_blocks=hidden_blocks,
+                displacement_emb=displacement_emb,
+                displacement_emb_dim=16,
+                disable_local_corr_grad = disable_local_corr_grad,
+                bn_momentum = 0.01,
+            ),
+            "1": ConvRefiner(
+                2 * 9 + 6,
+                24,
+                2 + 1,
+                kernel_size=kernel_size,
+                dw=dw,
+                hidden_blocks = hidden_blocks,
+                displacement_emb = displacement_emb,
+                displacement_emb_dim = 6,
+                disable_local_corr_grad = disable_local_corr_grad,
+                bn_momentum = 0.01,
+            ),
+        }
+        )
+        kernel_temperature = 0.2
+        learn_temperature = False
+        no_cov = True
+        kernel = CosKernel
+        only_attention = False
+        basis = "fourier"
+        gp16 = GP(
+            kernel,
+            T=kernel_temperature,
+            learn_temperature=learn_temperature,
+            only_attention=only_attention,
+            gp_dim=gp_dim,
+            basis=basis,
+            no_cov=no_cov,
+        )
+        gps = nn.ModuleDict({"16": gp16})
+        proj16 = nn.Sequential(nn.Conv2d(6400, 512, 1, 1), nn.BatchNorm2d(512))
+        proj8 = nn.Sequential(nn.Conv2d(512, 512, 1, 1), nn.BatchNorm2d(512))
+        proj4 = nn.Sequential(nn.Conv2d(256, 256, 1, 1), nn.BatchNorm2d(256))
+        proj2 = nn.Sequential(nn.Conv2d(128, 64, 1, 1), nn.BatchNorm2d(64))
+        proj1 = nn.Sequential(nn.Conv2d(64, 9, 1, 1), nn.BatchNorm2d(9))
+        proj = nn.ModuleDict({
+            "16": proj16,
+            "8": proj8,
+            "4": proj4,
+            "2": proj2,
+            "1": proj1,
+            })
+        displacement_dropout_p = 0.0
+        gm_warp_dropout_p = 0.0
+        decoder = Decoder(coordinate_decoder, 
+                        gps,
+                        proj, 
+                        conv_refiner, 
+                        detach=True, 
+                        scales=["16", "8", "4", "2", "1"], 
+                        displacement_dropout_p = displacement_dropout_p,
+                        gm_warp_dropout_p = gm_warp_dropout_p)
+        return FMWarpHead(net.enc_embed_dim + net.dec_embed_dim, decoder, patch_size)
     elif head_type == 'fm':
         return MultiScaleFM(net.local_feat_dim, net.desc_mode, net.desc_conf_mode, patch_size, net.detach)
     elif head_type == 'fm_mlp':

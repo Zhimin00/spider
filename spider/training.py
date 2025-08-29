@@ -148,8 +148,19 @@ def train(args):
     if args.pretrained and not args.resume:
         print('Loading pretrained: ', args.pretrained)
         ckpt = torch.load(args.pretrained, map_location=device)
-        print(model.load_state_dict(ckpt['model'], strict=False))
-        del ckpt  # in case it occupies memory
+        state_dict = ckpt['model']
+
+        renamed = {}
+        for k, v in state_dict.items():
+            if k.startswith("downstream_head1.head_local_features"):
+                k = k.replace("downstream_head1.head_local_features",
+                            "downstream_head.head_local_features1", 1)
+            elif k.startswith("downstream_head2.head_local_features"):
+                k = k.replace("downstream_head2.head_local_features",
+                            "downstream_head.head_local_features2", 1)
+            renamed[k] = v
+        print(model.load_state_dict(renamed, strict=False))
+        del ckpt, renamed  # in case it occupies memory
 
     eff_batch_size = args.batch_size * args.accum_iter * misc.get_world_size()
     if args.lr is None:  # only base_lr is specified
@@ -162,7 +173,6 @@ def train(args):
     print('Number of parameters: ', sum(p.numel() for p in model.parameters()))
     print('trainable parameters:', sum([p.numel() for n,p in model.named_parameters() if p.requires_grad]))
     print('trainable head parameters:', sum([p.numel() for n,p in model.downstream_head.named_parameters() if p.requires_grad]))
-
 
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(

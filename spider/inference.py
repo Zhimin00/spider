@@ -166,6 +166,35 @@ def symmetric_inference_upsample(model, img1_coarse, img2_coarse, img1, img2, de
     return (low_corresps12, corresps12, low_corresps21, corresps21)
 
 @torch.no_grad()
+def fmwarp_symmetric_inference(model, img1, img2, device):
+    # combine all ref images into object-centric representation
+    shape1 = img1['true_shape'].to(device, non_blocking=True)
+    shape2 = img2['true_shape'].to(device, non_blocking=True)
+    img1 = img1['img'].to(device, non_blocking=True)
+    img2 = img2['img'].to(device, non_blocking=True)
+    # compute encoder only once
+    feat1, feat2, pos1, pos2 = model._encode_image_pairs(img1, img2, shape1, shape2)
+
+    def decoder(feat1, feat2, pos1, pos2, shape1, shape2):
+        dec1, dec2 = model._decoder(feat1, pos1, feat2, pos2)
+        enc_output1, dec_output1 = dec1[0], dec1[-1]
+        enc_output2, dec_output2 = dec2[0], dec2[-1]
+        feat16_1 = torch.cat([enc_output1, dec_output1], dim=-1)
+        feat16_2 = torch.cat([enc_output2, dec_output2], dim=-1)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning)
+            with torch.cuda.amp.autocast(enabled=False):
+                corresps = model._downstream_head(1, feat16_1, feat16_2, shape1, shape2)
+        return corresps
+    # decoder 1-2
+    corresps12 = decoder(feat1, feat2, pos1, pos2, shape1, shape2)
+    # decoder 2-1
+    corresps21 = decoder(feat2, feat1, pos2, pos1, shape2, shape1)
+
+    return (corresps12, corresps21)
+
+@torch.no_grad()
 def spider_mast3r_symmetric_inference(model, img1, img2, device):
     # combine all ref images into object-centric representation
     shape1 = img1['true_shape'].to(device, non_blocking=True)

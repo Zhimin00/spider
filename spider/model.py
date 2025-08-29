@@ -118,6 +118,8 @@ class SPIDER (CroCoNet):
             'mask': [self.mask_token],
             'encoder': [self.mask_token, self.patch_embed, self.enc_blocks],
             'backbone': [self.mask_token, self.enc_norm, self.decoder_embed, self.dec_norm, self.patch_embed.norm, self.patch_embed.proj, self.enc_blocks, self.dec_blocks, self.dec_blocks2],
+            'backbone+desc': [self.mask_token, self.enc_norm, self.decoder_embed, self.dec_norm, self.patch_embed.norm, self.patch_embed.proj, self.enc_blocks, self.dec_blocks, self.dec_blocks2,
+                              self.downstream_head.head_local_features1, self.downstream_head.head_local_features2],
         }
         freeze_all_params(to_be_frozen[freeze])
 

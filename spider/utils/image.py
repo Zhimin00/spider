@@ -257,6 +257,49 @@ def resize_image_with_intrinsics(imgs_ori, size=512, square_ok=True, verbose=Tru
         print(f' (Found {len(imgs)} images)')
     return imgs, Ks
 
+def resize_image_with_H(imgs_ori, size=512, verbose=True, patch_size=16, H_ori=None):
+    imgs = []
+    assert len(imgs_ori) == 2, 'not two-view scenarios'
+    def resize_image(img, verbose=True):
+        W1, H1 = img.size
+        
+        scale = size / max(H1, W1)
+        w_new, h_new = int(round(W1*scale)), int(round(H1*scale))
+        w_new = max(math.ceil(w_new // patch_size), 1) * patch_size
+        h_new = max(math.ceil(h_new // patch_size), 1) * patch_size
+        img = img.resize((w_new, h_new))
+
+        W2, H2 = img.size
+
+        scale_x = W2 / W1
+        scale_y = H2 / H1
+        T = np.array([
+                    [scale_x, 0, 0],
+                    [0, scale_y, 0],
+                    [0, 0, 1]
+                ])
+        if verbose:
+            print(f' - adding with resolution {W1}x{H1} --> {W2}x{H2}')
+        return img, T
+    
+    for idx, img in enumerate(imgs_ori):
+        if idx == 0:
+            img, T1 = resize_image(img, verbose=verbose)
+        elif idx == 1:
+            img, T2 = resize_image(img, verbose=verbose)
+        imgs.append(dict(img=ImgNorm(img)[None], true_shape=torch.from_numpy(np.int32(
+            [img.size[::-1]])), idx=len(imgs), instance=str(len(imgs))))
+    if H_ori is not None:
+        # pdb.set_trace()
+        H_new = T2 @ H_ori @ np.linalg.inv(T1)
+    else:
+        H_new = None
+
+    assert imgs, 'no images'
+    if verbose:
+        print(f' (Found {len(imgs)} images)')
+    return imgs, H_new
+
 def load_two_images_with_H(img1_path, img2_path, size=512, square_ok=True, verbose=True, patch_size=16, H_ori=None):
     """ open and convert all images in a list or folder to proper input format for DUSt3R
     """

@@ -10,8 +10,9 @@ import json
 from argparse import ArgumentParser
 import random
 from spider.model import SPIDER_FM
-from spider.utils.image import load_images_with_intrinsics, load_images_with_intrinsics_strict, load_original_images, resize_image_with_intrinsics
-from spider.utils.utils import compute_relative_pose, estimate_pose, compute_pose_error, compute_pose_error_T, pose_auc
+from spider.utils.image import load_images_with_intrinsics_strict, load_original_images, resize_image_with_intrinsics
+from spider.utils.utils import compute_relative_pose, estimate_pose, compute_pose_error, pose_auc
+from spider.inference import fm_symmetric_inference
 
 from mast3r.model import AsymmetricMASt3R
 from mast3r.cloud_opt.sparse_ga import sparse_global_alignment
@@ -24,52 +25,38 @@ import mast3r.utils.path_to_dust3r #noqa
 from dust3r.utils.image import load_images
 from dust3r.utils.device import collate_with_cat
 
-def get_reconstructed_scene(filelist, output_file_path, model, device='cuda', silent=False, image_size=512):
-    imgs = load_images(filelist, size=image_size, verbose=not silent)
-    img_pairs = make_pairs(imgs, prefilter=None, symmetrize=True)
-    cache_dir = os.path.join(output_file_path, 'cache')
-    os.makedirs(cache_dir, exist_ok=True)
-    # Sparse GA (forward mast3r -> matching -> 3D optim -> 2D refinement -> triangulation)
-    try:
-        scene = sparse_global_alignment(filelist, img_pairs, cache_dir,
-                                    model, lr1=0.07, niter1=300, lr2=0.01, niter2=300, device=device,
-                                    opt_depth=True, shared_intrinsics=False,
-                                    matching_conf_thr=0)
-    
-        imgs = scene.imgs
-        cams2world = scene.get_im_poses() #[N, 4, 4]
-        world2cams = cams2world.cpu().detach().inverse()
-    finally:
-        shutil.rmtree(cache_dir)
-    return world2cams
-
 def load_intrinsics_and_pose(npz_path):
     camera_params = np.load(npz_path)
     K = camera_params["intrinsics"].astype(np.float32)
     T = camera_params["cam2world"].astype(np.float32)
     T_inv = np.linalg.inv(T)  
     return K, T_inv
-def mast3r_match(model, device, im_A_path, im_B_path, K1_ori, K2_ori, coarse_size=512, fine_size=1600):
+
+def spiderfm_match(model, device, im_A_path, im_B_path, K1_ori, K2_ori, coarse_size=512, fine_size=None):
     imgs_ori = load_original_images([im_A_path, im_B_path], verbose=False)
     if fine_size == coarse_size or fine_size is None:
-        imgs_coarse, intrinsics = resize_image_with_intrinsics(imgs_ori, size=coarse_size, intrinsics=[K1_ori, K2_ori], verbose=False)
-        K1, K2 = intrinsics
-
+        imgs_coarse, new_intrinsics = resize_image_with_intrinsics(imgs_ori, size=coarse_size, intrinsics=[K1_ori, K2_ori], verbose=False)
+        K1, K2 = new_intrinsics
         view1, view2 = imgs_coarse
         view1, view2 = collate_with_cat([(view1, view2)])
-        res = symmetric_inference(model, view1, view2, 'cuda')
+        res = fm_symmetric_inference(model, view1, view2, 'cuda')
         descs = [r['desc'][0] for r in res]
         qonfs = [r['desc_conf'][0] for r in res]  
         # perform reciprocal matching
         corres = extract_correspondences(descs, qonfs, device='cuda', subsample=8)
-        kpts1, kpts2, mconf = corres                                                
+        kpts1, kpts2, mconf = corres                                               
     else:
         imgs_coarse, _ = resize_image_with_intrinsics(imgs_ori, size=coarse_size, intrinsics=None, verbose=False)
-        imgs_fine, intrinsics = resize_image_with_intrinsics(imgs_ori, size=fine_size, intrinsics=[K1_ori, K2_ori], verbose=False)
-        K1, K2 = intrinsics
-        view1, view2 = imgs_coarse
+        imgs_fine, new_intrinsics = resize_image_with_intrinsics(imgs_ori, size=fine_size, intrinsics=[K1_ori, K2_ori], verbose=False)
+        K1, K2 = new_intrinsics
+
+        view1_coarse, view2_coarse = imgs_coarse
+        view1_coarse, view2_coarse = collate_with_cat([(view1_coarse, view2_coarse)])
+        view1, view2 = imgs_fine
         view1, view2 = collate_with_cat([(view1, view2)])
-        res = symmetric_inference(model, view1, view2, 'cuda')
+        
+
+        res = fm_symmetric_inference(model, view1_coarse, view2_coarse, 'cuda')
         descs = [r['desc'][0] for r in res]
         qonfs = [r['desc_conf'][0] for r in res]  
         # perform reciprocal matching
@@ -101,67 +88,13 @@ def mast3r_match(model, device, im_A_path, im_B_path, K1_ori, K2_ori, coarse_siz
         )
                                                 
         kpts1, kpts2, mconf = coarse_to_fine(h1, w1, h2, w2, imgs_fine, kpts1, kpts2, mconf, model, 'cuda')
+
+    kpts1, kpts2 = kpts1.cpu().numpy(), kpts2.cpu().numpy()
+    K1, K2 = new_intrinsics
     return kpts1, kpts2, mconf, K1, K2
 
-       
 
-# def mast3r_match(model, device, im_A_path, im_B_path, K1_ori, K2_ori, coarse_size=512, fine_size=1600):
-#     imgs, _ = load_images_with_intrinsics_strict([im_A_path, im_B_path], size=coarse_size, intrinsics=None)
-#     view1, view2 = imgs
-#     view1, view2 = collate_with_cat([(view1, view2)])
-#     res = symmetric_inference(model, view1, view2, device)
-#     descs = [r['desc'][0] for r in res]
-#     qonfs = [r['desc_conf'][0] for r in res]  
-#     # perform reciprocal matching
-#     corres = extract_correspondences(descs, qonfs, device=device, subsample=8)
-#     pts1, pts2, mconf = corres
-
-#     imgs_large, new_intrinsics = load_images_with_intrinsics_strict([im_A_path, im_B_path], size=fine_size, intrinsics=[K1_ori, K2_ori])
-#     h1_coarse, w1_coarse = imgs[0]['true_shape'][0]
-#     h2_coarse, w2_coarse = imgs[1]['true_shape'][0]
-
-#     h1, w1 = imgs_large[0]['true_shape'][0]
-#     h2, w2 = imgs_large[1]['true_shape'][0]
-#     kpts1 = (
-#         torch.stack(
-#             (
-#                 (w1 / w1_coarse) * (pts1[..., 0]),
-#                 (h1 / h1_coarse) * (pts1[..., 1]),
-#             ),
-#             axis=-1,
-#         )
-#     )
-#     kpts2 = (
-#         torch.stack(
-#             (
-#                 (w2 / w2_coarse) * (pts2[..., 0]),
-#                 (h2 / h2_coarse) * (pts2[..., 1]),
-#             ),
-#             axis=-1,
-#         )
-#     )
-                                            
-#     kpts1, kpts2, mconf = coarse_to_fine(h1, w1, h2, w2, imgs_large, kpts1, kpts2, model, device)
-#     kpts1, kpts2 = kpts1.cpu().numpy(), kpts2.cpu().numpy()
-#     K1, K2 = new_intrinsics
-#     return kpts1, kpts2, K1, K2
-
-
-# def mast3r_match_coarse(model, device, im_A_path, im_B_path, K1_ori, K2_ori, coarse_size=512):
-#     imgs, new_intrinsics = load_images_with_intrinsics_strict([im_A_path, im_B_path], size=coarse_size, intrinsics=[K1_ori, K2_ori])
-#     view1, view2 = imgs
-#     view1, view2 = collate_with_cat([(view1, view2)])
-#     res = symmetric_inference(model, view1, view2, device)
-#     descs = [r['desc'][0] for r in res]
-#     qonfs = [r['desc_conf'][0] for r in res]  
-#     # perform reciprocal matching
-#     corres = extract_correspondences(descs, qonfs, device=device, subsample=8)
-#     pts1, pts2, mconf = corres                                      
-#     kpts1, kpts2 = pts1.cpu().numpy(), pts2.cpu().numpy()
-#     K1, K2 = new_intrinsics
-#     return kpts1, kpts2, K1, K2
-
-def test_aerial(model, device, name, coarse_size, fine_size):
+def test_aerial(model, device, name, coarse_size, fine_size=None):
     data_root = '/cis/net/io99a/data/zshao/megadepth_aerial_data/megadepth_aerial_processed'
     with np.load(os.path.join(data_root, 'aerial_megadepth_test_scenes0015_0022.npz'), allow_pickle=True) as data:
         all_scenes = data['scenes']
@@ -186,7 +119,7 @@ def test_aerial(model, device, name, coarse_size, fine_size):
         im_A_path = f"{seq_path}/{im_A_name}.jpg"
         im_B_path = f"{seq_path}/{im_B_name}.jpg"
         
-        kpts1, kpts2, mconf, K1, K2 =  mast3r_match(model, device, im_A_path, im_B_path, K1_ori, K2_ori, coarse_size, fine_size)
+        kpts1, kpts2, mconf, K1, K2 =  spiderfm_match(model, device, im_A_path, im_B_path, K1_ori, K2_ori, coarse_size, fine_size=fine_size)
         for _ in range(5):
             shuffling = np.random.permutation(np.arange(len(kpts1)))
             kpts1 = kpts1[shuffling]
@@ -232,7 +165,7 @@ def test_aerial(model, device, name, coarse_size, fine_size):
             }
     json.dump(results, open(f"./mast3r_results/aerial_{name}.json", "w"))
 
-def test_mega(model, device, name, coarse_size, fine_size):
+def test_mega(model, device, name, coarse_size, fine_size=None):
     data_root = '/cis/net/r24a/data/zshao/data/megadepth/megadepth_test_1500'
     scene_names = [
                 "0015_0.1_0.3.npz",
@@ -269,7 +202,7 @@ def test_mega(model, device, name, coarse_size, fine_size):
             im_A_path = f"{data_root}/{im_paths[idx1]}"
             im_B_path = f"{data_root}/{im_paths[idx2]}"          
 
-            kpts1, kpts2, mconf, K1, K2 =  mast3r_match(model, device, im_A_path, im_B_path, K1_ori, K2_ori, coarse_size, fine_size)
+            kpts1, kpts2, mconf, K1, K2 =  spiderfm_match(model, device, im_A_path, im_B_path, K1_ori, K2_ori, coarse_size, fine_size)
             for _ in range(5):
                 shuffling = np.random.permutation(np.arange(len(kpts1)))
                 kpts1 = kpts1[shuffling]
@@ -315,7 +248,7 @@ def test_mega(model, device, name, coarse_size, fine_size):
             }
     json.dump(results, open(f"./mast3r_results/mega_{name}.json", "w"))
 
-def test_scannet(model, device, name, coarse_size, fine_size):
+def test_scannet(model, device, name, coarse_size, fine_size=None):
     data_root = '/cis/net/r24a/data/zshao/data/scannet1500'
     tmp = np.load(osp.join(data_root, "test.npz"))
     pairs, rel_pose = tmp["name"], tmp["rel_pose"]
@@ -364,7 +297,7 @@ def test_scannet(model, device, name, coarse_size, fine_size):
             
         K1_ori = K.copy()
         K2_ori = K.copy()
-        kpts1, kpts2, mconf, K1, K2 =  mast3r_match(model, device, im_A_path, im_B_path, K1_ori, K2_ori, coarse_size, fine_size)
+        kpts1, kpts2, mconf, K1, K2 =  spiderfm_match(model, device, im_A_path, im_B_path, K1_ori, K2_ori, coarse_size, fine_size)
         for _ in range(5):
             shuffling = np.random.permutation(np.arange(len(kpts1)))
             kpts1 = kpts1[shuffling]
@@ -410,110 +343,18 @@ def test_scannet(model, device, name, coarse_size, fine_size):
             }
     json.dump(results, open(f"./mast3r_results/scannet_{name}.json", "w"))
 
-
-def test_jhu(model, device, name, coarse_size, fine_size):
-    # detector = dad_detector.load_DaD()
-
-    data_root = '/cis/net/io96/data/zshao/JHU-ULTRA-360/pairs'
-    scene_names = [
-                # "10_AMES.npy",
-                "24_Clark.npy",
-                # "78_Shriver.npy",
-            ]
-    
-    scenes = [
-            np.load(f"{data_root}/{scene}", allow_pickle=True)
-            for scene in scene_names
-        ]
-
-    tot_e_t, tot_e_R, tot_e_pose = [], [], []
-    for scene_ind in range(len(scenes)):
-        scene_name = scene_names[scene_ind].split('.')[0]
-        pairs = scenes[scene_ind]
-        
-        pair_inds = range(len(pairs))
-        for pairind in tqdm(pair_inds):
-            im1_name, im2_name,  shared_points, overlap_ratio, T1, T2, K1, K2= pairs[pairind]
-            K1_ori = np.array(K1).reshape(3, 3)
-            K2_ori = np.array(K2).reshape(3, 3)
-            T1 = np.array(T1).reshape(4, 4)
-            T2 = np.array(T2).reshape(4, 4)
-            
-            R1, t1 = T1[:3, :3], T1[:3, 3]
-            R2, t2 = T2[:3, :3], T2[:3, 3]
-            R, t = compute_relative_pose(R1, t1, R2, t2)
-            
-            im_A_path = f"{data_root}/{scene_name}/{im1_name}"
-            im_B_path = f"{data_root}/{scene_name}/{im2_name}"          
-
-            kpts1, kpts2, mconf, K1, K2 =  mast3r_match(model, device, im_A_path, im_B_path, K1_ori, K2_ori,  coarse_size=coarse_size, fine_size=fine_size)
-            kpts1, kpts2 = kpts1.cpu().numpy(), kpts2.cpu().numpy()
-            # for _ in range(5):
-                # shuffling = np.random.permutation(np.arange(len(kpts1)))
-                # kpts1 = kpts1[shuffling]
-                # kpts2 = kpts2[shuffling]
-            try:
-                threshold = 0.5 
-                norm_threshold = threshold / (np.mean(np.abs(K1[:2, :2])) + np.mean(np.abs(K2[:2, :2])))
-                R_est, t_est, mask = estimate_pose(
-                    kpts1,
-                    kpts2,
-                    K1,
-                    K2,
-                    norm_threshold,
-                    conf=0.99999,
-                )
-                T1_to_2_est = np.concatenate((R_est, t_est), axis=-1)  #
-                e_t, e_R = compute_pose_error(T1_to_2_est, R, t)
-                e_pose = max(e_t, e_R)
-            except Exception as e:
-                print(repr(e))
-                e_t, e_R = 90, 90
-                e_pose = max(e_t, e_R)
-            tot_e_t.append(e_t)
-            tot_e_R.append(e_R)
-            tot_e_pose.append(e_pose)
-    tot_e_pose = np.array(tot_e_pose)
-    thresholds = [5, 10, 20, 30]
-    auc = pose_auc(tot_e_pose, thresholds)
-    acc_5 = (tot_e_pose < 5).mean()
-    acc_10 = (tot_e_pose < 10).mean()
-    acc_15 = (tot_e_pose < 15).mean()
-    acc_20 = (tot_e_pose < 20).mean()
-    acc_30 = (tot_e_pose < 30).mean()
-    map_5 = acc_5
-    map_10 = np.mean([acc_5, acc_10])
-    map_20 = np.mean([acc_5, acc_10, acc_15, acc_20])
-    results = { "auc_30": auc[3],
-                "auc_5": auc[0],
-                "auc_10": auc[1],
-                "auc_20": auc[2],
-                "map_5": map_5,
-                "map_10": map_10,
-                "map_20": map_20,
-            }
-    print(auc)
-    json.dump(results, open(f"./mast3r_results/jhu_{name}.json", "w"))
-
 if __name__ == '__main__':
     parser = ArgumentParser()
-    parser.add_argument("--exp_name", default='mast3r', type=str)
+    parser.add_argument("--exp_name", default='spiderfm', type=str)
     parser.add_argument("--dataset", default='aerial', type=str)
-    parser.add_argument("--model_name", default='mast3r', type=str)
+    parser.add_argument("--model_name", default='spiderfm', type=str)
     parser.add_argument("--coarse_size", default=512, type=int)
-    parser.add_argument("--fine_size", default=1600, type=int)
+    parser.add_argument("--fine_size", default=512, type=int)
     args, _ = parser.parse_known_args()
-    model_dict = {'mast3r': 'naver/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric', 
-     'aerial-mast3r': '/cis/home/zshao14/checkpoints/checkpoint-aerial-mast3r.pth',
-     'spiderfm': '/cis/home/zshao14/checkpoints/spiderfm_0827/checkpoint-best.pth'}
 
     device = 'cuda'
-    if args.model_name == 'spiderfm':
-        model = SPIDER_FM.from_pretrained(model_dict[args.model_name]).to(device)
-    else:
-        model = AsymmetricMASt3R.from_pretrained(model_dict[args.model_name]).to(device)
+    model = SPIDER_FM.from_pretrained('/cis/home/zshao14/checkpoints/spiderfm_0827/checkpoint-best.pth').to(device)
     experiment_name = args.exp_name
-
     seed = 42
     random.seed(seed)
     np.random.seed(seed)
@@ -527,6 +368,4 @@ if __name__ == '__main__':
         test_mega(model, device, experiment_name, args.coarse_size, args.fine_size)
     elif args.dataset == 'aerial':
         test_aerial(model, device, experiment_name, args.coarse_size, args.fine_size)
-    elif args.dataset == 'jhu':
-        test_jhu(model, device, experiment_name, args.coarse_size, args.fine_size)
     

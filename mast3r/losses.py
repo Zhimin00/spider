@@ -398,7 +398,6 @@ class MatchingLoss (Criterion, MultiLoss):
         B, N = x1.shape
         batchid = torch.arange(B)[:, None].repeat(1, N)  # B, N
         outdesc1, outdesc2 = desc1[batchid, y1, x1], desc2[batchid, y2, x2]  # B, N, D
-
         # Padd with unused negatives
         outdesc2 = self.add_negatives(outdesc2, desc2, batchid, x2, y2)
 
@@ -457,6 +456,272 @@ class MatchingLoss (Criterion, MultiLoss):
 
         details[type(self).__name__] = float(loss.mean())
         return loss, (details | monitoring)
+
+class WarpMatchingLoss (Criterion, MultiLoss):
+    """ 
+    Matching loss per image 
+    only compare pixels inside an image but not in the whole batch as what would be done usually
+    """
+
+    def __init__(self, criterion, withconf=False, use_pts3d=False, normalize=False, negatives_padding=0, blocksize=4096, threshold=0.5):
+        super().__init__(criterion)
+        self.normalize = normalize
+        self.negatives_padding = negatives_padding
+        self.use_pts3d = use_pts3d
+        self.blocksize = blocksize
+        self.withconf = withconf
+
+    def add_negatives(self, outdesc2, desc2, batchid, x2, y2):
+        if self.negatives_padding:
+            B, H, W, D = desc2.shape
+            negatives = torch.ones([B, H, W], device=desc2.device, dtype=bool)
+            negatives[batchid, y2, x2] = False
+            sel = negatives & (negatives.view([B, -1]).cumsum(dim=-1).view(B, H, W)
+                               <= self.negatives_padding)  # take the N-first negatives
+            outdesc2 = torch.cat([outdesc2, desc2[sel].view([B, -1, D])], dim=1)
+        return outdesc2
+
+    def get_confs(self, pred1, pred2, sel1, sel2):
+        if self.withconf:
+            if self.use_pts3d:
+                outconfs1 = pred1['conf'][sel1]
+                outconfs2 = pred2['conf'][sel2]
+            else:
+                outconfs1 = pred1['desc_conf'][sel1]
+                outconfs2 = pred2['desc_conf'][sel2]
+        else:
+            outconfs1 = outconfs2 = None
+        return outconfs1, outconfs2
+
+
+    
+    def get_descs(self, pred1, pred2):
+        if self.use_pts3d:
+            desc1, desc2 = pred1['pts3d'], pred2['pts3d_in_other_view']
+        else:
+            desc1, desc2 = pred1['desc'], pred2['desc']
+        return desc1, desc2
+
+    def get_matching_descs(self, gt1, gt2, pred1, pred2, corresps=None, **kw):
+        outdesc1 = outdesc2 = outconfs1 = outconfs2 = None
+        # Recover descs, GT corres and valid mask
+        desc1, desc2 = self.get_descs(pred1, pred2)
+        B, H, W, C = desc1.shape
+
+        flow = corresps[1]['flow'] #B, 2, H1, W1
+        certainty = corresps[1]['certainty'][:,0].exp().clip(max= float('inf')) #B, H1, W1
+        desc1_warped = nn.functional.grid_sample(desc2.permute(0, 3, 1, 2), flow.permute(0, 2, 3, 1), mode= 'bilinear', align_corners = True) #B, H1, W1, C
+        desc1_warped = desc1_warped.permute(0, 2, 3, 1) #B, H1, W1, C
+        # cert_flat = certainty.reshape(-1)
+        # probs = cert_flat / (cert_flat.sum() + 1e-6)
+        # idx = torch.multinomial(probs, self.num_samples, replacement=False)
+        # f1[idx], f1_warped[idx]
+        (x1, y1) = gt1['corres'].unbind(-1) # b*2, 8192
+        valid_matches = gt1['valid_corres']
+
+        # desc1_flat = desc1.reshape(B, HW, C)
+        # desc1_warped_flat = desc1_warped.reshape(B, HW, C)
+        # cert_flat = certainty.reshape(B, HW)
+        # idx = torch.randint(0, HW, (B, self.num_samples), device=desc1.device)
+        # outdesc1 = torch.gather(desc1_flat, 1, idx.unsqueeze(-1).expand(-1, -1, C))
+        # outdesc2 = torch.gather(desc1_warped_flat, 1, idx.unsqueeze(-1).expand(-1, -1, C))
+        # cert = torch.gather(cert_flat, 1, idx)
+        # labels = (cert > self.pos_thresh).float()
+        # labels = torch.clamp(labels, min=0.05)
+        # sim_matrix = torch.bmm(outdesc1, outdesc2.transpose(-2, -1)/self.t)
+
+        # batchid, y1, x1 = torch.nonzero(certainty>0.5, as_tuple=False).unbind(-1)
+        
+        
+        # Select descs that have GT matches
+        B, N = x1.shape
+        batchid = torch.arange(B)[:, None].repeat(1, N)  # B, N
+        outdesc1, outdesc2 = desc1[batchid, y1, x1], desc1_warped[batchid, y1, x1]  # B, N, D
+
+        sel1 = batchid, y1, x1
+        outconfs1 = pred1['desc_conf'][sel1]
+        outconfs2 = certainty[sel1]
+        return outdesc1, outdesc2, outconfs1, outconfs2, valid_matches, {'use_euclidean_dist': self.use_pts3d}
+
+    def blockwise_criterion(self, descs1, descs2, confs1, confs2, valid_matches, euc, rng=np.random, shuffle=True):
+        loss = None
+        details = {}
+        B, N, D = descs1.shape
+
+        if N <= self.blocksize:  # Blocks are larger than provided descs, compute regular loss
+            loss = self.criterion(descs1, descs2, valid_matches, euc=euc)
+        else:  # Compute criterion on the blockdiagonal only, after shuffling
+            # Shuffle if necessary
+            matches_perm = slice(None)
+            if shuffle:
+                matches_perm = np.stack([rng.choice(range(N), size=N, replace=False) for _ in range(B)])
+                batchid = torch.tile(torch.arange(B), (N, 1)).T
+                matches_perm = batchid, matches_perm
+
+            descs1 = descs1[matches_perm]
+            descs2 = descs2[matches_perm]
+            valid_matches = valid_matches[matches_perm]
+
+            assert N % self.blocksize == 0, "Error, can't chunk block-diagonal, please check blocksize"
+            n_chunks = N // self.blocksize
+            descs1 = descs1.reshape([B * n_chunks, self.blocksize, D])  # [B*(N//blocksize), blocksize, D]
+            descs2 = descs2.reshape([B * n_chunks, self.blocksize, D])  # [B*(N//blocksize), blocksize, D]
+            valid_matches = valid_matches.view([B * n_chunks, self.blocksize])
+            loss = self.criterion(descs1, descs2, valid_matches, euc=euc)
+            if self.withconf:
+                confs1, confs2 = map(lambda x: x[matches_perm], (confs1, confs2))  # apply perm to confidences if needed
+
+        if self.withconf:
+            # split confidences between positives/negatives for loss computation
+            details['conf_pos'] = map(lambda x: x[valid_matches.view(B, -1)], (confs1, confs2))
+            details['conf_neg'] = map(lambda x: x[~valid_matches.view(B, -1)], (confs1, confs2))
+            details['Conf1_std'] = confs1.std()
+            details['Conf2_std'] = confs2.std()
+
+        return loss, details
+
+    def compute_loss(self, gt1, gt2, pred1, pred2, **kw):
+        # Gather preds and GT
+        descs1, descs2, confs1, confs2, valid_matches, monitoring = self.get_matching_descs(
+            gt1, gt2, pred1, pred2, **kw)
+
+        # loss on matches
+        loss, details = self.blockwise_criterion(descs1, descs2, confs1, confs2,
+                                                 valid_matches, euc=monitoring.pop('use_euclidean_dist', False))
+
+        details[type(self).__name__] = float(loss.mean())
+        return loss, (details | monitoring)
+
+
+class WarpMatchingLoss2 (Criterion, MultiLoss):
+    """ 
+    Matching loss per image 
+    only compare pixels inside an image but not in the whole batch as what would be done usually
+    """
+
+    def __init__(self, criterion, withconf=False, use_pts3d=False, negatives_padding=0, num_samples = 8192, blocksize=4096, pos_thresh=0.5):
+        super().__init__(criterion)
+        self.negatives_padding = negatives_padding
+        self.use_pts3d = use_pts3d
+        self.blocksize = blocksize
+        self.withconf = withconf
+        self.pos_thresh = pos_thresh
+        self.num_samples = num_samples
+
+    def add_negatives(self, outdesc2, desc2, batchid, x2, y2):
+        if self.negatives_padding:
+            B, H, W, D = desc2.shape
+            negatives = torch.ones([B, H, W], device=desc2.device, dtype=bool)
+            negatives[batchid, y2, x2] = False
+            sel = negatives & (negatives.view([B, -1]).cumsum(dim=-1).view(B, H, W)
+                               <= self.negatives_padding)  # take the N-first negatives
+            outdesc2 = torch.cat([outdesc2, desc2[sel].view([B, -1, D])], dim=1)
+        return outdesc2
+
+    def get_confs(self, pred1, pred2, sel1, sel2):
+        if self.withconf:
+            if self.use_pts3d:
+                outconfs1 = pred1['conf'][sel1]
+                outconfs2 = pred2['conf'][sel2]
+            else:
+                outconfs1 = pred1['desc_conf'][sel1]
+                outconfs2 = pred2['desc_conf'][sel2]
+        else:
+            outconfs1 = outconfs2 = None
+        return outconfs1, outconfs2
+
+
+    
+    def get_descs(self, pred1, pred2):
+        if self.use_pts3d:
+            desc1, desc2 = pred1['pts3d'], pred2['pts3d_in_other_view']
+        else:
+            desc1, desc2 = pred1['desc'], pred2['desc']
+        return desc1, desc2
+
+    def get_matching_descs(self, gt1, gt2, pred1, pred2, corresps=None, **kw):
+        outdesc1 = outdesc2 = outconfs1 = outconfs2 = None
+        # Recover descs, GT corres and valid mask
+        desc1, desc2 = self.get_descs(pred1, pred2)
+        B, H, W, C = desc1.shape
+        HW = H*W
+        flow = corresps[1]['flow'] #B, 2, H1, W1
+        certainty = corresps[1]['certainty'][:,0].exp().clip(max= float('inf')) #B, H1, W1
+        desc1_warped = nn.functional.grid_sample(desc2.permute(0, 3, 1, 2), flow.permute(0, 2, 3, 1), mode= 'bilinear', align_corners = True) #B, H1, W1, C
+        desc1_warped = desc1_warped.permute(0, 2, 3, 1) #B, H1, W1, C
+        
+        
+
+        desc1_flat = desc1.reshape(B, HW, C)
+        desc1_warped_flat = desc1_warped.reshape(B, HW, C)
+        cert_flat = certainty.reshape(B, HW)
+        confs1_flat = pred1['desc_conf'].reshape(B, HW)
+
+        num_top = self.num_samples // 2
+        sorted_idx = torch.argsort(cert_flat, dim=1, descending=True)
+        top_idx = sorted_idx[:, :num_top]
+        bottom_idx = sorted_idx[:, -num_top:]
+        sample_idx = torch.cat([top_idx, bottom_idx], dim=1)
+    
+        outdesc1 = torch.gather(desc1_flat, 1, sample_idx.unsqueeze(-1).expand(-1, -1, C))
+        outdesc2 = torch.gather(desc1_warped_flat, 1, sample_idx.unsqueeze(-1).expand(-1, -1, C))
+        outconfs2 = torch.gather(cert_flat, 1, sample_idx)
+        outconfs1 = torch.gather(confs1_flat, 1, sample_idx)
+        valid_matches_top = torch.ones([B, num_top], dtype=torch.bool)
+        valid_matches_bottom = torch.zeros([B, num_top], dtype=torch.bool)
+        valid_matches = torch.cat([valid_matches_top, valid_matches_bottom], dim=1)
+
+        return outdesc1, outdesc2, outconfs1, outconfs2, valid_matches, {'use_euclidean_dist': self.use_pts3d}
+
+    def blockwise_criterion(self, descs1, descs2, confs1, confs2, valid_matches, euc, rng=np.random, shuffle=True):
+        loss = None
+        details = {}
+        B, N, D = descs1.shape
+
+        if N <= self.blocksize:  # Blocks are larger than provided descs, compute regular loss
+            loss = self.criterion(descs1, descs2, valid_matches, euc=euc)
+        else:  # Compute criterion on the blockdiagonal only, after shuffling
+            # Shuffle if necessary
+            matches_perm = slice(None)
+            if shuffle:
+                matches_perm = np.stack([rng.choice(range(N), size=N, replace=False) for _ in range(B)])
+                batchid = torch.tile(torch.arange(B), (N, 1)).T
+                matches_perm = batchid, matches_perm
+
+            descs1 = descs1[matches_perm]
+            descs2 = descs2[matches_perm]
+            valid_matches = valid_matches[matches_perm]
+
+            assert N % self.blocksize == 0, "Error, can't chunk block-diagonal, please check blocksize"
+            n_chunks = N // self.blocksize
+            descs1 = descs1.reshape([B * n_chunks, self.blocksize, D])  # [B*(N//blocksize), blocksize, D]
+            descs2 = descs2.reshape([B * n_chunks, self.blocksize, D])  # [B*(N//blocksize), blocksize, D]
+            valid_matches = valid_matches.view([B * n_chunks, self.blocksize])
+            loss = self.criterion(descs1, descs2, valid_matches, euc=euc)
+            if self.withconf:
+                confs1, confs2 = map(lambda x: x[matches_perm], (confs1, confs2))  # apply perm to confidences if needed
+
+        if self.withconf:
+            # split confidences between positives/negatives for loss computation
+            details['conf_pos'] = map(lambda x: x[valid_matches.view(B, -1)], (confs1, confs2))
+            details['conf_neg'] = map(lambda x: x[~valid_matches.view(B, -1)], (confs1, confs2))
+            details['Conf1_std'] = confs1.std()
+            details['Conf2_std'] = confs2.std()
+
+        return loss, details
+
+    def compute_loss(self, gt1, gt2, pred1, pred2, **kw):
+        # Gather preds and GT
+        descs1, descs2, confs1, confs2, valid_matches, monitoring = self.get_matching_descs(
+            gt1, gt2, pred1, pred2, **kw)
+
+        # loss on matches
+        loss, details = self.blockwise_criterion(descs1, descs2, confs1, confs2,
+                                                 valid_matches, euc=monitoring.pop('use_euclidean_dist', False))
+
+        details[type(self).__name__] = float(loss.mean())
+        return loss, (details | monitoring)
+
 
 class MatchingLoss_Scale16 (Criterion, MultiLoss):
     """ 

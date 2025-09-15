@@ -25,7 +25,7 @@ import torch
 import torch.backends.cudnn as cudnn
 from torch.utils.tensorboard import SummaryWriter
 torch.backends.cuda.matmul.allow_tf32 = True  # for gpu >= Ampere and pytorch >= 1.12
-from spider.inference import loss_of_one_batch, loss_of_one_batch_fm
+from spider.inference import loss_of_one_batch_twoheads
 from spider.losses import *
 
 import spider.utils.path_to_dust3r #noqa
@@ -38,13 +38,8 @@ from croco.utils.misc import NativeScalerWithGradNormCount as NativeScaler  # no
 import pdb
 
 def adjust_learning_rate_spider(optimizer, epoch, args):
-    """Decay the learning rate with half-cycle cosine after warmup"""
+    """Decay the learning rate tp 1/10 after warmup"""
     
-    # if epoch < args.warmup_epochs:
-    #     lr = args.lr * epoch / args.warmup_epochs 
-    # else:
-    #     lr = args.min_lr + (args.lr - args.min_lr) * 0.5 * \
-    #         (1. + math.cos(math.pi * (epoch - args.warmup_epochs) / (args.epochs - args.warmup_epochs)))
     if epoch == args.warmup_epochs:
         for param_group in optimizer.param_groups:
             param_group["lr"] *= 0.1
@@ -52,14 +47,19 @@ def adjust_learning_rate_spider(optimizer, epoch, args):
     return lr
 
 def get_args_parser():
-    parser = argparse.ArgumentParser('SPIDER_FM training', add_help=False)
+    parser = argparse.ArgumentParser('SPIDER_twoheads training', add_help=False)
     # model and criterion
     parser.add_argument('--model', default="SPIDER(patch_embed_cls='ManyAR_PatchEmbed')",
                         type=str, help="string containing the model to build")
     parser.add_argument('--pretrained', default=None, help='path of a starting checkpoint')
-    parser.add_argument('--train_criterion', default="RobustLosses()",
-                        type=str, help="train criterion")
-    parser.add_argument('--test_criterion', default=None, type=str, help="test criterion")
+    parser.add_argument('--train_criterion1', default="RobustLosses()",
+                        type=str, help="train criterion1")
+    parser.add_argument('--train_criterion2', default=None,
+                        type=str, help="train criterion2")
+    parser.add_argument('--train_criterion12', default=None,
+                        type=str, help="train criterion12")
+    parser.add_argument('--test_criterion1', default=None, type=str, help="test criterion1")
+    parser.add_argument('--test_criterion2', default=None, type=str, help="test criterion2")
 
     # dataset
     parser.add_argument('--train_dataset', required=True, type=str, help="training set")
@@ -141,10 +141,16 @@ def train(args):
     # model
     print('Loading model: {:s}'.format(args.model))
     model = eval(args.model)
-    print(f'>> Creating train criterion = {args.train_criterion}')
-    train_criterion = eval(args.train_criterion).to(device)
-    print(f'>> Creating test criterion = {args.test_criterion or args.train_criterion}')
-    test_criterion = eval(args.test_criterion or args.train_criterion).to(device)
+    print(f'>> Creating train criterion = {args.train_criterion1} and {args.train_criterion2} and {args.train_criterion12}')
+    train_criterion1 = eval(args.train_criterion1).to(device)
+    train_criterion2 = eval(args.train_criterion2).to(device)
+    if args.train_criterion12 is not None:
+        train_criterion12 = eval(args.train_criterion12).to(device)
+    else:
+        train_criterion12 = None
+    print(f'>> Creating test criterion = {args.test_criterion1} and  {args.test_criterion2}')
+    test_criterion1 = eval(args.test_criterion1).to(device)
+    test_criterion2 = eval(args.test_criterion2).to(device)
 
     model.to(device)
     model_without_ddp = model
@@ -153,8 +159,19 @@ def train(args):
     if args.pretrained and not args.resume:
         print('Loading pretrained: ', args.pretrained)
         ckpt = torch.load(args.pretrained, map_location=device)
+        # state_dict = ckpt['model']
         print(model.load_state_dict(ckpt['model'], strict=False))
-        del ckpt  # in case it occupies memory
+        # renamed = {}
+        # for k, v in state_dict.items():
+        #     if k.startswith("downstream_head1.head_local_features"):
+        #         k = k.replace("downstream_head1.head_local_features",
+        #                     "downstream_head.head_local_features1", 1)
+        #     elif k.startswith("downstream_head2.head_local_features"):
+        #         k = k.replace("downstream_head2.head_local_features",
+        #                     "downstream_head.head_local_features2", 1)
+        #     renamed[k] = v
+        # print(model.load_state_dict(renamed, strict=False))
+        del ckpt#, renamed  # in case it occupies memory
 
     eff_batch_size = args.batch_size * args.accum_iter * misc.get_world_size()
     if args.lr is None:  # only base_lr is specified
@@ -166,9 +183,9 @@ def train(args):
 
     print('Number of parameters: ', sum(p.numel() for p in model.parameters()))
     print('trainable parameters:', sum([p.numel() for n,p in model.named_parameters() if p.requires_grad]))
+    print('trainable warp head parameters:', sum([p.numel() for n,p in model.downstream_headwarp.named_parameters() if p.requires_grad]))
     print('trainable head1 parameters:', sum([p.numel() for n,p in model.downstream_head1.named_parameters() if p.requires_grad]))
     print('trainable head2 parameters:', sum([p.numel() for n,p in model.downstream_head2.named_parameters() if p.requires_grad]))
-
 
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(
@@ -180,10 +197,10 @@ def train(args):
     # optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
     param_groups = [
         {"params": model_without_ddp.cnn.parameters(), "lr": 32 * 5e-6 / 8},
+        {"params": model_without_ddp.downstream_headwarp.parameters(), "lr": 32 * 1e-4 / 8},
         {"params": model_without_ddp.downstream_head1.parameters(), "lr": 32 * 1e-4 / 8},
         {"params": model_without_ddp.downstream_head2.parameters(), "lr": 32 * 1e-4 / 8},
     ]
-
     optimizer = torch.optim.AdamW(param_groups, weight_decay=0.01)
     print(optimizer)
     loss_scaler = NativeScaler()
@@ -230,7 +247,7 @@ def train(args):
         if (epoch > 0 and args.eval_freq > 0 and epoch % args.eval_freq == 0):
             test_stats = {}
             for test_name, testset in data_loader_test.items():
-                stats = test_one_epoch(model, test_criterion, testset,
+                stats = test_one_epoch(model, test_criterion1, test_criterion2, testset,
                                        device, epoch, log_writer=log_writer, args=args, prefix=test_name)
                 test_stats[test_name] = stats
 
@@ -252,7 +269,7 @@ def train(args):
 
         # Train
         train_stats = train_one_epoch(
-            model, train_criterion, data_loader_train,
+            model, train_criterion1, train_criterion2, train_criterion12, data_loader_train,
             optimizer, device, epoch, loss_scaler,
             log_writer=log_writer,
             args=args)
@@ -292,7 +309,8 @@ def build_dataset(dataset, batch_size, num_workers, test=False):
     return loader
 
 
-def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
+def train_one_epoch(model: torch.nn.Module, 
+                    criterion1: torch.nn.Module, criterion2: torch.nn.Module, criterion12: torch.nn.Module,
                     data_loader: Sized, optimizer: torch.optim.Optimizer,
                     device: torch.device, epoch: int, loss_scaler,
                     args,
@@ -323,7 +341,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             adjust_learning_rate_spider(optimizer, epoch_f, args)
         if batch is None:
             continue
-        loss_tuple = loss_of_one_batch_fm(batch, model, criterion, device,
+        loss_tuple = loss_of_one_batch_twoheads(batch, model, criterion1, criterion2, criterion12, device,
                                        symmetrize_batch=True,
                                        use_amp=bool(args.amp), ret='loss')
         loss, loss_details = loss_tuple  # criterion returns two values
@@ -368,7 +386,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
 
 @torch.no_grad()
-def test_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
+def test_one_epoch(model: torch.nn.Module, criterion1: torch.nn.Module, criterion2: torch.nn.Module,
                    data_loader: Sized, device: torch.device, epoch: int,
                    args, log_writer=None, prefix='test'):
 
@@ -388,7 +406,7 @@ def test_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
     for _, batch in enumerate(metric_logger.log_every(data_loader, args.print_freq, header)):
         if batch is None:
             continue
-        loss_tuple = loss_of_one_batch_fm(batch, model, criterion, device,
+        loss_tuple = loss_of_one_batch_twoheads(batch, model, criterion1, criterion2, None, device,
                                        symmetrize_batch=True,
                                        use_amp=bool(args.amp), ret='loss')
         loss_value, loss_details = loss_tuple  # criterion returns two values

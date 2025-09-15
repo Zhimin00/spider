@@ -290,6 +290,16 @@ def _to_pixel_coordinates( coords, H, W):
     kpts = torch.stack((W/2 * (coords[...,0]+1), H/2 * (coords[...,1]+1)),axis=-1)
     return kpts
  
+def match_keypoints2(x_A, x_B, warp0, certainty0, warp1, certainty1):
+    assert len(warp0.shape) == 3 and int(warp0.shape[2]) == 4 and len(warp1.shape) == 3 and int(warp1.shape[2]) == 4, str(warp0.shape)
+    # warp B keypoints into image A
+    x_A_from_B = F.grid_sample(warp1[:, :, :2].permute(2,0,1)[None], x_B[None,None], align_corners = False, mode = "bilinear")[0,:,0].mT
+    cert_A_from_B = F.grid_sample(certainty1[None, None, :, :], x_B[None,None], align_corners = False, mode = "bilinear")[0,0,0]
+    # match in the coordinate system of A
+    D = torch.cdist(x_A, x_A_from_B)
+    inds_A, inds_B = torch.nonzero((D == D.min(dim=-1, keepdim = True).values) * (D == D.min(dim=-2, keepdim = True).values) * (cert_A_from_B[None,:] > 0.01), as_tuple = True)
+    return torch.cat((x_A[inds_A], x_B[inds_B]), dim=-1), cert_A_from_B[inds_B]
+
 def match_keypoints(x_A, x_B, warp0, certainty0, warp1, certainty1):
     assert len(warp0.shape) == 3 and int(warp0.shape[2]) == 4 and len(warp1.shape) == 3 and int(warp1.shape[2]) == 4, str(warp0.shape)
     # warp B keypoints into image A
@@ -299,7 +309,6 @@ def match_keypoints(x_A, x_B, warp0, certainty0, warp1, certainty1):
     D = torch.cdist(x_A, x_A_from_B)
     inds_A, inds_B = torch.nonzero((D == D.min(dim=-1, keepdim = True).values) * (D == D.min(dim=-2, keepdim = True).values) * (cert_A_from_B[None,:] > 0.01), as_tuple = True)
     return inds_A, inds_B, cert_A_from_B[inds_B]
-
 
 def recover_pose(E, kpts0, kpts1, K0, K1, mask):
     best_num_inliers = 0

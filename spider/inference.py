@@ -282,6 +282,36 @@ def loss_of_one_batch_fm(batch, model, criterion, device, symmetrize_batch=False
     result = dict(view1=view1, view2=view2, pred1=pred1, pred2=pred2, loss=loss)
     return result[ret] if ret else result
 
+def loss_of_one_batch_twoheads(batch, model, criterion1, criterion2, criterion12, device, symmetrize_batch=False, use_amp=False, ret=None):
+    view1, view2 = batch
+    ignore_keys = set(['pts3d', 'dataset', 'label', 'instance', 'idx', 'true_shape', 'rng'])
+    for view in batch:
+        for name in view.keys():  # pseudo_focal
+            if name in ignore_keys:
+                continue
+            view[name] = view[name].to(device, non_blocking=True)
+
+    if symmetrize_batch:
+        view1, view2 = make_batch_symmetric(batch)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=FutureWarning)
+        with torch.cuda.amp.autocast(enabled=bool(use_amp)):
+            corresps, pred1, pred2  = model(view1, view2)
+
+            # loss is supposed to be symmetric
+            with torch.cuda.amp.autocast(enabled=False):
+                loss1, details1 = criterion1(view1, view2, corresps) if criterion1 is not None else (None, None)
+                loss2, details2 = criterion2(view1, view2, pred1, pred2) if criterion2 is not None else (None, None)
+                loss12, details12 = criterion12(view1, view2, pred1, pred2, corresps=corresps) if criterion12 is not None else (None, None)
+                loss_all = sum(l for l in [loss1, loss2, loss12] if l is not None)
+                details_all = {}
+                for d in [details1, details2, details12]:
+                    if d is not None:
+                        details_all.update(d)
+                loss = loss_all, details_all
+    result = dict(view1=view1, view2=view2, pred1=pred1, pred2=pred2, loss=loss)
+    return result[ret] if ret else result
 
 
 def loss_of_one_batch(batch, model, criterion, device, symmetrize_batch=False, use_amp=False, ret=None):

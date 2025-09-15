@@ -6,8 +6,8 @@ import os
 import os.path as osp
 import cv2
 import pdb
-from spider.utils.utils import compute_relative_pose, estimate_pose, compute_pose_error, pose_auc, match, match_upsample, match_single, match_symmetric, match_symmetric_upsample, sample, sample_symmetric, to_pixel_coordinates, make_symmetric_pairs, tensor_to_pil
-from spider.utils.image import load_images_with_intrinsics, load_two_images_with_H, load_images_with_intrinsics_strict, load_two_images_with_H_strict,  load_original_images, resize_image_with_intrinsics
+from spider.utils.utils import match_keypoints2, compute_relative_pose, estimate_pose, compute_pose_error, pose_auc, match, match_upsample, match_single, match_symmetric, match_symmetric_upsample, sample, sample_symmetric, to_pixel_coordinates, make_symmetric_pairs, tensor_to_pil
+from spider.utils.image import load_images_with_intrinsics, load_two_images_with_H, resize_image_with_H, load_images_with_intrinsics_strict, load_two_images_with_H_strict,  load_original_images, resize_image_with_intrinsics
 from spider.inference import inference, inference_upsample, crops_inference
 from spider.inference import symmetric_inference as spider_symmetric_inference
 from spider.inference import symmetric_inference_upsample as spider_symmetric_inference_upsample
@@ -24,6 +24,10 @@ from mast3r.cloud_opt.sparse_ga import extract_correspondences
 
 import mast3r.utils.path_to_dust3r #noqa
 from dust3r.utils.device import collate_with_cat
+import sys
+dad_path = os.path.abspath('/cis/home/zshao14/Downloads/dad')
+sys.path.insert(0, dad_path)
+import dad as dad_detector
 
 def crop(img, crop):
     out_cropped_img = img.clone()
@@ -61,6 +65,46 @@ def fine_matching(query_views, map_views, model, device, max_batch_size=48):
     matches_im_query = torch.cat(matches_im_query, dim=0)
     return matches_im_query, matches_im_map
 
+
+def dad_spider_match_path(detector, im_A_path, im_B_path, K1_ori, K2_ori, model, device = 'cuda', coarse_size=512, fine_size=None, is_scannet=False):
+    dad_kpts0 = detector.detect_from_path(im_A_path, num_keypoints=4096*8, return_dense_probs=False)['keypoints'][0].float()
+    dad_kpts1 = detector.detect_from_path(im_B_path, num_keypoints=4096*8, return_dense_probs=False)['keypoints'][0].float()
+    imgs_ori = load_original_images([im_A_path, im_B_path], verbose=False)
+    if fine_size == coarse_size or fine_size is None:
+        imgs_coarse, intrinsics = resize_image_with_intrinsics(imgs_ori, size=coarse_size, intrinsics=[K1_ori, K2_ori], verbose=False)
+        K1, K2 = intrinsics
+        view1, view2 = imgs_coarse
+        view1, view2 = collate_with_cat([(view1, view2)])
+        corresps12, corresps21 = spider_symmetric_inference(model, view1, view2, device)
+        warp0, certainty0 = match(corresps12)
+        warp1, certainty1 = match(corresps21, inverse=True)  
+        h1, w1 = imgs_coarse[0]['true_shape'][0]
+        h2, w2 = imgs_coarse[1]['true_shape'][0]
+    else:
+        imgs_coarse, _ = resize_image_with_intrinsics(imgs_ori, size=coarse_size, intrinsics=None, verbose=False)
+        imgs_fine, intrinsics = resize_image_with_intrinsics(imgs_ori, size=fine_size, intrinsics=[K1_ori, K2_ori], verbose=False)
+        K1, K2 = intrinsics
+
+        view1_coarse, view2_coarse = imgs_coarse
+        view1_coarse, view2_coarse = collate_with_cat([(view1_coarse, view2_coarse)])
+        view1, view2 = imgs_fine
+        view1, view2 = collate_with_cat([(view1, view2)])
+        low_corresps12, corresps12, low_corresps21, corresps21 = spider_symmetric_inference_upsample(model, view1_coarse, view2_coarse, view1, view2, device)
+        warp0, certainty0 = match_upsample(corresps12, low_corresps12)
+        warp1, certainty1 = match_upsample(corresps21, low_corresps21, inverse=True)
+        h1, w1 = imgs_fine[0]['true_shape'][0]
+        h2, w2 = imgs_fine[1]['true_shape'][0]
+    if is_scannet:
+        scale1 = 480 / min(w1, h1)
+        scale2 = 480 / min(w2, h2)
+        w1, h1 = scale1 * w1, scale1 * h1
+        w2, h2 = scale2 * w2, scale2 * h2
+        K1 = K1 * scale1.item()
+        K2 = K2 * scale2.item()
+    # sparse_matches, mconf = sample_symmetric(warp0, certainty0, warp1, certainty1, num=5000)
+    sparse_matches, mconf = match_keypoints2(dad_kpts0, dad_kpts1, warp0, certainty0, warp1, certainty1)
+    kpts1, kpts2 = to_pixel_coordinates(sparse_matches, h1, w1, h2, w2)
+    return kpts1, kpts2, mconf, K1, K2
 
 def spider_match_path(im_A_path, im_B_path, K1_ori, K2_ori, model, device = 'cuda', coarse_size=512, fine_size=None, is_scannet=False):
     imgs_ori = load_original_images([im_A_path, im_B_path], verbose=False)
@@ -115,6 +159,7 @@ class AerialMegaDepthPoseEstimationBenchmark:
         return K, T_inv
 
     def benchmark(self, model, device='cuda', model_name = 'spider', debug=False, coarse_size=512, fine_size=1344):
+        detector = dad_detector.load_DaD()
         with torch.no_grad():
             data_root = self.data_root
             tot_e_t, tot_e_R, tot_e_pose = [], [], []
@@ -139,7 +184,8 @@ class AerialMegaDepthPoseEstimationBenchmark:
                 im_A_path = f"{seq_path}/{im_A_name}.jpg"
                 im_B_path = f"{seq_path}/{im_B_name}.jpg"
 
-                kpts1, kpts2, mconf, K1, K2 = spider_match_path(im_A_path, im_B_path, K1_ori, K2_ori, model, device, coarse_size=coarse_size, fine_size=fine_size)
+                # kpts1, kpts2, mconf, K1, K2 = spider_match_path(im_A_path, im_B_path, K1_ori, K2_ori, model, device, coarse_size=coarse_size, fine_size=fine_size)
+                kpts1, kpts2, mconf, K1, K2 = dad_spider_match_path(detector, im_A_path, im_B_path, K1_ori, K2_ori, model, device, coarse_size=coarse_size, fine_size=fine_size)
                 
                 kpts1, kpts2 = kpts1.cpu().numpy(), kpts2.cpu().numpy()
                 for _ in range(5):
@@ -206,6 +252,7 @@ class MegaDepthPoseEstimationBenchmark:
         self.data_root = data_root
 
     def benchmark(self, model, device='cuda', model_name = 'spider', debug=False, coarse_size=512, fine_size=1344):
+        detector = dad_detector.load_DaD()
         with torch.no_grad():
             data_root = self.data_root
             tot_e_t, tot_e_R, tot_e_pose = [], [], []
@@ -231,7 +278,8 @@ class MegaDepthPoseEstimationBenchmark:
                     T1_to_2 = np.concatenate((R,t[:,None]), axis=-1)
                     im_A_path = f"{data_root}/{im_paths[idx1]}"
                     im_B_path = f"{data_root}/{im_paths[idx2]}"
-                    kpts1, kpts2, mconf, K1, K2 = spider_match_path(im_A_path, im_B_path, K1_ori, K2_ori, model, device, coarse_size=coarse_size, fine_size=fine_size)
+                    # kpts1, kpts2, mconf, K1, K2 = spider_match_path(im_A_path, im_B_path, K1_ori, K2_ori, model, device, coarse_size=coarse_size, fine_size=fine_size)
+                    kpts1, kpts2, mconf, K1, K2 = dad_spider_match_path(detector, im_A_path, im_B_path, K1_ori, K2_ori, model, device, coarse_size=coarse_size, fine_size=fine_size)
                 
                     kpts1, kpts2 = kpts1.cpu().numpy(), kpts2.cpu().numpy()
                     # imgs, _ = load_images_with_intrinsics_strict([im_A_path, im_B_path], size=coarse_size, intrinsics=None)
@@ -769,6 +817,7 @@ class ScanNetBenchmark:
         self.data_root = data_root
 
     def benchmark(self, model, device='cuda', model_name = 'spider', debug=False, coarse_size=512, fine_size=1344):
+        detector = dad_detector.load_DaD()
         with torch.no_grad():
             data_root = self.data_root
             tmp = np.load(osp.join(data_root, "test.npz"))
@@ -907,7 +956,9 @@ class ScanNetBenchmark:
                               
 
                 offset = 0.5
-                kpts1, kpts2, mconf, K1, K2 = spider_match_path(im_A_path, im_B_path, K1_ori, K2_ori, model, device, coarse_size=coarse_size, fine_size=fine_size, is_scannet=True)
+                # kpts1, kpts2, mconf, K1, K2 = spider_match_path(im_A_path, im_B_path, K1_ori, K2_ori, model, device, coarse_size=coarse_size, fine_size=fine_size, is_scannet=True)
+                kpts1, kpts2, mconf, K1, K2 = dad_spider_match_path(detector, im_A_path, im_B_path, K1_ori, K2_ori, model, device, coarse_size=coarse_size, fine_size=fine_size)
+                
                 kpts1, kpts2 = kpts1.cpu().numpy(), kpts2.cpu().numpy()
                 # kpts1 = sparse_matches[:, :2]
                 # kpts1 = kpts1.cpu().numpy()
@@ -1036,80 +1087,7 @@ class HpatchesHomogBenchmark:
                     H = np.loadtxt(
                         os.path.join(self.seqs_path, seq_name, "H_1_" + str(im_idx))
                     )
-                    imgs, _ = load_two_images_with_H_strict(im_A_path, im_B_path, size=coarse_size, H_ori=None)
-                    imgs_large, H_new = load_two_images_with_H_strict(im_A_path, im_B_path, size=fine_size, H_ori=H)
-                    image_pairs = make_symmetric_pairs(imgs)
-                    image_large_pairs = make_symmetric_pairs(imgs_large)
-                    res = inference_upsample(image_pairs, image_large_pairs, model, device, batch_size=1, verbose=True)
-                    
-                    warp1, certainty1, warp2, certainty2 = match_symmetric_upsample(res['corresps'], res['low_corresps'])
-                    good_matches, _ = sample_symmetric(warp1, certainty1, warp2, certainty2, num=5000)
-
-                    h1, w1 = imgs_large[0]['true_shape'][0]
-                    h2, w2 = imgs_large[1]['true_shape'][0]
-                    pos_a, pos_b = self.convert_coordinates(
-                        good_matches[:, :2], good_matches[:, 2:], w1, h1, w2, h2
-                    )
-                    if debug:
-                        from matplotlib import pyplot as pl
-                        save_dir = '/cis/home/zshao14/Downloads/spider/assets/hpatches_benchmark'
-                        os.makedirs(save_dir, exist_ok=True)
-                        view1, view2 = res['view1'], res['view2']
-                        image_mean = torch.as_tensor([0.5, 0.5, 0.5], device='cpu').reshape(1, 3, 1, 1)
-                        image_std = torch.as_tensor([0.5, 0.5, 0.5], device='cpu').reshape(1, 3, 1, 1)
-
-                        viz_imgs = []
-                        for i, view in enumerate([view1, view2]):
-                            rgb_tensor = view['img'][0] * image_std + image_mean
-                            viz_imgs.append(rgb_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy())
-
-                        H0, W0, H1, W1 = *viz_imgs[0].shape[:2], *viz_imgs[1].shape[:2]
-                        matches_im0, matches_im1 = pos_a, pos_b
-                        
-                        valid_matches_im0 = (matches_im0[:, 0] >= 3) & (matches_im0[:, 0] < int(W0) - 3) & (
-                            matches_im0[:, 1] >= 3) & (matches_im0[:, 1] < int(H0) - 3)
-
-                        valid_matches_im1 = (matches_im1[:, 0] >= 3) & (matches_im1[:, 0] < int(W1) - 3) & (
-                            matches_im1[:, 1] >= 3) & (matches_im1[:, 1] < int(H1) - 3)
-
-                        valid_matches = valid_matches_im0 & valid_matches_im1
-                        matches_im0, matches_im1 = matches_im0[valid_matches], matches_im1[valid_matches]
-
-                        num_matches = len(matches_im0)
-                        n_viz = 100
-                        match_idx_to_viz = np.round(np.linspace(0, num_matches - 1, n_viz)).astype(int)
-                        viz_matches_im0, viz_matches_im1 = matches_im0[match_idx_to_viz], matches_im1[match_idx_to_viz]
-                        img0 = np.pad(viz_imgs[0], ((0, max(H1 - H0, 0)), (0, 0), (0, 0)), 'constant', constant_values=0)
-                        img1 = np.pad(viz_imgs[1], ((0, max(H0 - H1, 0)), (0, 0), (0, 0)), 'constant', constant_values=0)
-                        img = np.concatenate((img0, img1), axis=1)
-                        
-                        pl.figure()
-                        pl.imshow(img)
-                        pl.axis('off')  
-                        pl.savefig(os.path.join(save_dir, 'raw.png'), dpi=300, bbox_inches='tight')
-                        pl.close()
-
-                        pl.figure()
-                        pl.imshow(img)
-                        cmap = pl.get_cmap('jet')
-                        for i in range(n_viz):
-                            (x0, y0), (x1, y1) = viz_matches_im0[i].T, viz_matches_im1[i].T
-                            pl.plot([x0, x1 + W0], [y0, y1], '-+', color=cmap(i / (n_viz - 1)), scalex=False, scaley=False)
-                        # pl.show(block=True)
-                        pl.savefig(os.path.join(save_dir, 'matches.png'), dpi=300, bbox_inches='tight')
-                        pl.close()
-                        im2_transfer_rgb = F.grid_sample(
-                            view2['img'][0][None], warp1[:,:, 2:][None], mode="bilinear", align_corners=False
-                            )[0] ###H1, W1
-                        im1_transfer_rgb = F.grid_sample(
-                            view1['img'][0][None], warp2[:, :, :2][None], mode="bilinear", align_corners=False
-                            )[0] ###H2, W2
-                        white_im1 = torch.ones((H0,W0))
-                        white_im2 = torch.ones((H1,W1))
-                        vis_im1 = certainty1 * im2_transfer_rgb + (1 - certainty1) * white_im1
-                        vis_im2 = certainty2 * im1_transfer_rgb + (1 - certainty2) * white_im2
-                        tensor_to_pil(vis_im1, unnormalize=False).save(os.path.join(save_dir, f'warp_im1.jpg'))
-                        tensor_to_pil(vis_im2, unnormalize=False).save(os.path.join(save_dir, f'warp_im2.jpg'))
+                    pos_a, pos_b, mconf, H_new, h1, w1, h2, w2 = spider_match_path_H(im_A_path, im_B_path, H, model, device, coarse_size=coarse_size, fine_size=fine_size)
 
                     try:
                         H_pred, inliers = cv2.findHomography(
@@ -1146,3 +1124,32 @@ class HpatchesHomogBenchmark:
                 "hpatches_homog_auc_5": auc[4],
                 "hpatches_homog_auc_10": auc[9],
             }
+        
+def spider_match_path_H(im_A_path, im_B_path, H, model, device = 'cuda', coarse_size=512, fine_size=None, is_scannet=False):
+    imgs_ori = load_original_images([im_A_path, im_B_path], verbose=False)
+    if fine_size == coarse_size or fine_size is None:
+        imgs_coarse, H_new = resize_image_with_H(imgs_ori, size=coarse_size, verbose=False, patch_size=16, H_ori=H)
+        view1, view2 = imgs_coarse
+        view1, view2 = collate_with_cat([(view1, view2)])
+        corresps12, corresps21 = spider_symmetric_inference(model, view1, view2, device)
+        warp0, certainty0 = match(corresps12)
+        warp1, certainty1 = match(corresps21, inverse=True)  
+        h1, w1 = imgs_coarse[0]['true_shape'][0]
+        h2, w2 = imgs_coarse[1]['true_shape'][0]
+    else:
+        imgs_coarse, _ = resize_image_with_H(imgs_ori, size=coarse_size, H_ori=H, verbose=False)
+        imgs_fine, H_new = resize_image_with_H(imgs_ori, size=fine_size, H_ori=H, verbose=False)
+
+        view1_coarse, view2_coarse = imgs_coarse
+        view1_coarse, view2_coarse = collate_with_cat([(view1_coarse, view2_coarse)])
+        view1, view2 = imgs_fine
+        view1, view2 = collate_with_cat([(view1, view2)])
+        low_corresps12, corresps12, low_corresps21, corresps21 = spider_symmetric_inference_upsample(model, view1_coarse, view2_coarse, view1, view2, device)
+        warp0, certainty0 = match_upsample(corresps12, low_corresps12)
+        warp1, certainty1 = match_upsample(corresps21, low_corresps21, inverse=True)
+        h1, w1 = imgs_fine[0]['true_shape'][0]
+        h2, w2 = imgs_fine[1]['true_shape'][0]
+
+    sparse_matches, mconf = sample_symmetric(warp0, certainty0, warp1, certainty1, num=5000)
+    kpts1, kpts2 = to_pixel_coordinates(sparse_matches, h1, w1, h2, w2)
+    return kpts1, kpts2, mconf, H_new, h1, w1, h2, w2

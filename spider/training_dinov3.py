@@ -202,15 +202,15 @@ def train(args):
         model_without_ddp = model.module
 
     # following timm: set wd as 0 for bias and norm layers
-    # param_groups = misc.get_parameter_groups(model_without_ddp, args.weight_decay)
-    # optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
-    param_groups = [
-        {"params": model_without_ddp.cnn.parameters(), "lr": 32 * 5e-6 / 8},
-        {"params": model_without_ddp.downstream_headwarp.parameters(), "lr": 32 * 1e-4 / 8},
-        {"params": model_without_ddp.downstream_head1.parameters(), "lr": 32 * 1e-4 / 8},
-        {"params": model_without_ddp.downstream_head2.parameters(), "lr": 32 * 1e-4 / 8},
-    ]
-    optimizer = torch.optim.AdamW(param_groups, weight_decay=0.01)
+    param_groups = misc.get_parameter_groups(model_without_ddp, args.weight_decay)
+    optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
+    # param_groups = [
+    #     {"params": model_without_ddp.cnn.parameters(), "lr": 32 * 5e-6 / 8},
+    #     {"params": model_without_ddp.downstream_headwarp.parameters(), "lr": 32 * 1e-4 / 8},
+    #     {"params": model_without_ddp.downstream_head1.parameters(), "lr": 32 * 1e-4 / 8},
+    #     {"params": model_without_ddp.downstream_head2.parameters(), "lr": 32 * 1e-4 / 8},
+    # ]
+    # optimizer = torch.optim.AdamW(param_groups, weight_decay=0.01)
     print(optimizer)
     loss_scaler = NativeScaler()
 
@@ -347,7 +347,7 @@ def train_one_epoch(model: torch.nn.Module,
 
         # we use a per iteration (instead of per epoch) lr scheduler
         if data_iter_step % accum_iter == 0:
-            adjust_learning_rate_spider(optimizer, epoch_f, args)
+            misc.adjust_learning_rate_spider(optimizer, epoch_f, args)
         if batch is None:
             continue
         loss_tuple = loss_of_one_batch_twoheads(batch, model, criterion1, criterion2, criterion12, device,

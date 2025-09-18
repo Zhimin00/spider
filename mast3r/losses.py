@@ -234,6 +234,30 @@ class MatchingCriterion(BaseCriterion):
         raise NotImplementedError
 
 
+class MatchingCriterion3(BaseCriterion):
+    def __init__(self, reduction='mean', fp=torch.float32):
+        super().__init__(reduction)
+        self.fp = fp
+
+    def forward(self, a, b, c, valid_matches=None, euc=False):
+        assert a.ndim >= 2 and 1 <= a.shape[-1], f'Bad shape = {a.shape}'
+        dist = self.loss(a.to(self.fp), b.to(self.fp), c.to(self.fp), valid_matches, euc=euc)
+        # one dimension less or reduction to single value
+        assert (valid_matches is None and dist.ndim == a.ndim -
+                1) or self.reduction in ['mean', 'sum', '1-mean', 'none']
+        if self.reduction == 'none':
+            return dist
+        if self.reduction == 'sum':
+            return dist.sum()
+        if self.reduction == 'mean':
+            return dist.mean() if dist.numel() > 0 else dist.new_zeros(())
+        if self.reduction == '1-mean':
+            return 1. - dist.mean() if dist.numel() > 0 else dist.new_ones(())
+        raise ValueError(f'bad {self.reduction=} mode')
+
+    def loss(self, a, b, c, valid_matches=None):
+        raise NotImplementedError
+    
 class InfoNCE(MatchingCriterion):
     def __init__(self, temperature=0.07, eps=1e-8, mode='all', **kwargs):
         super().__init__(**kwargs)
@@ -271,7 +295,7 @@ class InfoNCE(MatchingCriterion):
             raise ValueError("This should not happen...")
         return loss[valid_matches]
 
-class InfoNCE_weighted(MatchingCriterion):
+class InfoNCE_weighted(MatchingCriterion3):
     def __init__(self, temperature=0.07, eps=1e-8, mode='all', **kwargs):
         super().__init__(**kwargs)
         self.temperature = temperature
@@ -282,9 +306,9 @@ class InfoNCE_weighted(MatchingCriterion):
     def loss(self, desc1, desc2, desc_warp, valid_matches=None, euc=False):
         # valid positives are along diagonals
         B, N, D = desc1.shape
-        B_warp, N_warp, D_warp = desc_warp
+        B_warp, N_warp, D_warp = desc_warp.shape
         B2, N2, D2 = desc2.shape
-        assert B == B2 and D == D2 and B == B_warp, D == D_warp
+        assert B == B2 and D == D2 and B == B_warp and D == D_warp
         if valid_matches is None:
             valid_matches = torch.ones([B, N], dtype=bool)
         # torch.all(valid_matches.sum(dim=-1) > 0) some pairs have no matches????
@@ -307,19 +331,7 @@ class InfoNCE_weighted(MatchingCriterion):
         norm_sim = positives / (positives.max(dim=-1, keepdim=True).values + 1e-8)
         weights = 1.0 - norm_sim  # strong weight when sim is low
 
-        # --- Base loss ---
-        if self.mode == 'all':            # Previous InfoNCE
-            base_loss = -torch.log((positives / sim.sum(dim=-1).sum(dim=-1, keepdim=True)).clip(self.eps))
-        elif self.mode == 'proper':       # Proper InfoNCE
-            base_loss = -(torch.log((positives / sim.sum(dim=-2)).clip(self.eps)) +
-                        torch.log((positives / sim.sum(dim=-1)).clip(self.eps)))
-        elif self.mode == 'dual':         # Dual Softmax
-            base_loss = -(torch.log((positives**2 / sim.sum(dim=-1) / sim.sum(dim=-2)).clip(self.eps)))
-        else:
-            raise ValueError("This should not happen...")
-
         # --- Warp loss (weighted by similarity gap) ---
-        # --- Warp loss (mirrors base modes) ---
         if self.mode == 'all':
             warp_loss = -weights * torch.log((positives_warp / sim_warp.sum(dim=-1).sum(dim=-1, keepdim=True)).clip(self.eps))
         elif self.mode == 'proper':
@@ -638,11 +650,11 @@ class WarpMatchingLoss3 (Criterion, MultiLoss):
 
     def compute_loss(self, gt1, gt2, pred1, pred2, **kw):
         # Gather preds and GT
-        descs1, descs2, desc_warp, confs1, confs2, confs_warp, valid_matches, monitoring = self.get_matching_descs(
+        descs1, descs2, descs_warp, confs1, confs2, confs_warp, valid_matches, monitoring = self.get_matching_descs(
             gt1, gt2, pred1, pred2, **kw)
 
         # loss on matches
-        loss, details = self.blockwise_criterion(descs1, descs2, desc_warp, confs1, confs2, confs_warp,
+        loss, details = self.blockwise_criterion(descs1, descs2, descs_warp, confs1, confs2, confs_warp,
                                                  valid_matches, euc=monitoring.pop('use_euclidean_dist', False))
 
         details[type(self).__name__] = float(loss.mean())
@@ -1428,6 +1440,53 @@ class ConfMatchingLoss(ConfLoss):
         # Recover confidences for positive and negative samples
         conf1_pos, conf2_pos = details.pop('conf_pos')
         conf1_neg, conf2_neg = details.pop('conf_neg')
+        conf_pos = self.aggregate_confs(conf1_pos, conf2_pos)
+
+        # weight Matching loss by confidence on positives
+        conf_pos, log_conf_pos = self.get_conf_log(conf_pos)
+        conf_loss = loss * conf_pos - self.alpha * log_conf_pos
+        # average + nan protection (in case of no valid pixels at all)
+        conf_loss = conf_loss.mean() if conf_loss.numel() > 0 else 0
+        # Add negative confs loss to give some supervision signal to confidences for pixels that are not matched in GT
+        if self.neg_conf_loss_quantile:
+            conf_neg = torch.cat([conf1_neg, conf2_neg])
+            conf_neg, log_conf_neg = self.get_conf_log(conf_neg)
+
+            # recover quantile that will be used for negatives loss value assignment
+            neg_loss_value = torch.quantile(loss, self.neg_conf_loss_quantile).detach()
+            neg_loss = neg_loss_value * conf_neg - self.alpha * log_conf_neg
+
+            neg_loss = neg_loss.mean() if neg_loss.numel() > 0 else 0
+            conf_loss = conf_loss + neg_loss
+
+        return conf_loss, dict(matching_conf_loss=float(conf_loss), **details)
+
+class ConfMatchingLoss3(ConfLoss):
+    """ Weight matching by learned confidence. Same as ConfLoss but for a matching criterion
+        Assuming the input matching_loss is a match-level loss.
+    """
+
+    def __init__(self, pixel_loss, alpha=1., confmode='prod', neg_conf_loss_quantile=False):
+        super().__init__(pixel_loss, alpha)
+        self.pixel_loss.withconf = True
+        self.confmode = confmode
+        self.neg_conf_loss_quantile = neg_conf_loss_quantile
+
+    def aggregate_confs(self, confs1, confs2):  # get the confidences resulting from the two view predictions
+        if self.confmode == 'prod':
+            confs = confs1 * confs2 if confs1 is not None and confs2 is not None else 1.
+        elif self.confmode == 'mean':
+            confs = .5 * (confs1 + confs2) if confs1 is not None and confs2 is not None else 1.
+        else:
+            raise ValueError(f"Unknown conf mode {self.confmode}")
+        return confs
+
+    def compute_loss(self, gt1, gt2, pred1, pred2, **kw):
+        # compute per-pixel loss
+        loss, details = self.pixel_loss(gt1, gt2, pred1, pred2, **kw)
+        # Recover confidences for positive and negative samples
+        conf1_pos, confwarp_pos, conf2_pos = details.pop('conf_pos')
+        conf1_neg, confwarp_neg, conf2_neg = details.pop('conf_neg')
         conf_pos = self.aggregate_confs(conf1_pos, conf2_pos)
 
         # weight Matching loss by confidence on positives

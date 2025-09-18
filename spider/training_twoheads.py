@@ -53,7 +53,7 @@ def get_args_parser():
                         type=str, help="string containing the model to build")
     parser.add_argument('--pretrained', default=None, help='path of a starting checkpoint')
     parser.add_argument('--pretrained_warp', default=None, help='path of a starting checkpoint')
-    parser.add_argument('--train_criterion1', default="RobustLosses()",
+    parser.add_argument('--train_criterion1', default=None,
                         type=str, help="train criterion1")
     parser.add_argument('--train_criterion2', default=None,
                         type=str, help="train criterion2")
@@ -143,7 +143,10 @@ def train(args):
     print('Loading model: {:s}'.format(args.model))
     model = eval(args.model)
     print(f'>> Creating train criterion = {args.train_criterion1} and {args.train_criterion2} and {args.train_criterion12}')
-    train_criterion1 = eval(args.train_criterion1).to(device)
+    if args.train_criterion1 is not None:
+        train_criterion1 = eval(args.train_criterion1).to(device)
+    else:
+        train_criterion1 = None
     if args.train_criterion2 is not None:
         train_criterion2 = eval(args.train_criterion2).to(device)
     else:
@@ -208,7 +211,7 @@ def train(args):
     # pdb.set_trace()
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(
-            model, device_ids=[args.gpu], find_unused_parameters=True, static_graph=True)
+            model, device_ids=[args.gpu], find_unused_parameters=True, static_graph=False)
         model_without_ddp = model.module
 
     # following timm: set wd as 0 for bias and norm layers

@@ -9,7 +9,7 @@ from spider.model import SPIDER_twoheads
 import spider.training
 spider.training.SPIDER_twoheads = SPIDER_twoheads
 
-from mast3r.losses import ConfMatchingLoss, MatchingLoss, WarpMatchingLoss, WarpMatchingLoss2, APLoss, InfoNCE, MatchingLoss_Scale16, MatchingLoss_Scale8, MatchingLoss_Scale4, MatchingLoss_Scale2
+from mast3r.losses import ConfMatchingLoss, ConfMatchingLoss3, MatchingLoss, WarpMatchingLoss, WarpMatchingLoss2, WarpMatchingLoss3, APLoss, InfoNCE, InfoNCE_weighted, MatchingLoss_Scale16, MatchingLoss_Scale8, MatchingLoss_Scale4, MatchingLoss_Scale2
 from mast3r.datasets import Habitat, ARKitScenes, BlendedMVS, Co3d, MegaDepth, MegaDepth_all, Aerial_MegaDepth, ScanNetpp, StaticThings3D, Waymo, WildRGBD
 
 
@@ -18,8 +18,11 @@ spider.training_twoheads.SPIDER_twoheads = SPIDER_twoheads
 spider.training_twoheads.MatchingLoss = MatchingLoss
 spider.training_twoheads.WarpMatchingLoss = WarpMatchingLoss
 spider.training_twoheads.WarpMatchingLoss2 = WarpMatchingLoss2
+spider.training_twoheads.WarpMatchingLoss3 = WarpMatchingLoss3
 spider.training_twoheads.ConfMatchingLoss = ConfMatchingLoss
+spider.training_twoheads.ConfMatchingLoss = ConfMatchingLoss3
 spider.training_twoheads.InfoNCE = InfoNCE
+spider.training_twoheads.InfoNCE_weighted = InfoNCE_weighted
 spider.training_twoheads.APLoss = APLoss
 
 import spider.utils.path_to_dust3r  # noqa

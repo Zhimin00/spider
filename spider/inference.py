@@ -201,7 +201,7 @@ def twoheads_symmetric_inference(model, img1, img2, device):
 @torch.no_grad()
 def twoheads_symmetric_inference_upsample(model, img1_coarse, img2_coarse, img1, img2, device):
     # combine all ref images into object-centric representation
-    low_corresps12, low_corresps21 = symmetric_inference(model, img1_coarse, img2_coarse, device)
+    low_corresps12, low_corresps21 = twoheads_symmetric_inference(model, img1_coarse, img2_coarse, device)
     shape1 = img1['true_shape'].to(device, non_blocking=True)
     shape2 = img2['true_shape'].to(device, non_blocking=True)
     img1 = img1['img'].to(device, non_blocking=True)

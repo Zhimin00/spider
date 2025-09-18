@@ -1075,55 +1075,68 @@ class HpatchesHomogBenchmark:
 
     def benchmark(self, model, device='cuda', model_name = 'spider', debug=False, coarse_size=512, fine_size=1344):
         homog_dists = []
-        with torch.no_grad():
-            for seq_idx, seq_name in tqdm(
-                enumerate(self.seq_names), total=len(self.seq_names)
-            ):
-                im_A_path = os.path.join(self.seqs_path, seq_name, "1.ppm")
-                im_A = Image.open(im_A_path)
-                w1, h1 = im_A.size
-                for im_idx in range(2, 7):
-                    im_B_path = os.path.join(self.seqs_path, seq_name, f"{im_idx}.ppm")
-                    H = np.loadtxt(
-                        os.path.join(self.seqs_path, seq_name, "H_1_" + str(im_idx))
-                    )
-                    pos_a, pos_b, mconf, H_new, h1, w1, h2, w2 = spider_match_path_H(im_A_path, im_B_path, H, model, device, coarse_size=coarse_size, fine_size=fine_size)
+        
+        for seq_idx, seq_name in tqdm(
+            enumerate(self.seq_names), total=len(self.seq_names)
+        ):
+            im_A_path = os.path.join(self.seqs_path, seq_name, "1.ppm")
+            im_A = Image.open(im_A_path)
+            w1, h1 = im_A.size
+            for im_idx in range(2, 7):
+                im_B_path = os.path.join(self.seqs_path, seq_name, f"{im_idx}.ppm")
+                im_B = Image.open(im_B_path)
+                w2, h2 = im_B.size
+                H = np.loadtxt(
+                    os.path.join(self.seqs_path, seq_name, "H_1_" + str(im_idx))
+                )
+                # pos_a, pos_b, mconf, H_new, h1, w1, h2, w2 = spider_match_path_H(im_A_path, im_B_path, H, model, device, coarse_size=coarse_size, fine_size=fine_size)
+                # pos_a, pos_b, mconf = pos_a.cpu().numpy(), pos_b.cpu().numpy(), mconf.cpu().numpy()
 
-                    try:
-                        H_pred, inliers = cv2.findHomography(
-                            pos_a,
-                            pos_b,
-                            method = cv2.RANSAC,
-                            confidence = 0.99999,
-                            ransacReprojThreshold = 3 * min(w2, h2) / 480,
-                        )
-                    except:
-                        H_pred = None
-                    if H_pred is None:
-                        H_pred = np.zeros((3, 3))
-                        H_pred[2, 2] = 1.0
-                    corners = np.array(
-                        [[0, 0, 1], [0, h1 - 1, 1], [w1 - 1, 0, 1], [w1 - 1, h1 - 1, 1]]
+                sparse_matches, mconf = spider_match_path_H(im_A_path, im_B_path, H, model, device, coarse_size=coarse_size, fine_size=fine_size)
+                sparse_matches = sparse_matches.cpu().numpy()
+                pos_a, pos_b = self.convert_coordinates(sparse_matches[:, :2], sparse_matches[:, 2:], w1, h1, w2, h2)
+                try:
+                    H_pred, inliers = cv2.findHomography(
+                        pos_a,
+                        pos_b,
+                        method = cv2.RANSAC,
+                        confidence = 0.99999,
+                        ransacReprojThreshold = 3 * min(w2, h2) / 480,
                     )
-                    real_warped_corners = np.dot(corners, np.transpose(H_new))
-                    real_warped_corners = (
-                        real_warped_corners[:, :2] / real_warped_corners[:, 2:]
-                    )
-                    warped_corners = np.dot(corners, np.transpose(H_pred))
-                    warped_corners = warped_corners[:, :2] / warped_corners[:, 2:]
-                    mean_dist = np.mean(
-                        np.linalg.norm(real_warped_corners - warped_corners, axis=1)
-                    ) / (min(w2, h2) / 480.0)
-                    homog_dists.append(mean_dist)
-                    # pdb.set_trace()
+                except:
+                    H_pred = None
+                if H_pred is None:
+                    H_pred = np.zeros((3, 3))
+                    H_pred[2, 2] = 1.0
+                corners = np.array(
+                    [[0, 0, 1], [0, h1 - 1, 1], [w1 - 1, 0, 1], [w1 - 1, h1 - 1, 1]]
+                )
+                real_warped_corners = np.dot(corners, np.transpose(H))
+                real_warped_corners = (
+                    real_warped_corners[:, :2] / real_warped_corners[:, 2:]
+                )
+                warped_corners = np.dot(corners, np.transpose(H_pred))
+                warped_corners = warped_corners[:, :2] / warped_corners[:, 2:]
+                mean_dist = np.mean(
+                    np.linalg.norm(real_warped_corners - warped_corners, axis=1)
+                ) / (min(w2, h2) / 480.0)
+                homog_dists.append(mean_dist)
+                # pdb.set_trace()
 
-            thresholds = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-            auc = pose_auc(np.array(homog_dists), thresholds)
-            return {
-                "hpatches_homog_auc_3": auc[2],
-                "hpatches_homog_auc_5": auc[4],
-                "hpatches_homog_auc_10": auc[9],
-            }
+        thresholds = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        auc = pose_auc(np.array(homog_dists), thresholds)
+        print(auc)
+        homog_dists = np.array(homog_dists)
+        acc_3 = (homog_dists < 3).mean()
+        acc_5 = (homog_dists < 5).mean()
+        acc_10 = (homog_dists < 10).mean()
+        print(acc_3, acc_5, acc_10)
+        pdb.set_trace()
+        return {
+            "hpatches_homog_auc_3": auc[2],
+            "hpatches_homog_auc_5": auc[4],
+            "hpatches_homog_auc_10": auc[9],
+        }
         
 def spider_match_path_H(im_A_path, im_B_path, H, model, device = 'cuda', coarse_size=512, fine_size=None, is_scannet=False):
     imgs_ori = load_original_images([im_A_path, im_B_path], verbose=False)
@@ -1150,6 +1163,7 @@ def spider_match_path_H(im_A_path, im_B_path, H, model, device = 'cuda', coarse_
         h1, w1 = imgs_fine[0]['true_shape'][0]
         h2, w2 = imgs_fine[1]['true_shape'][0]
 
-    sparse_matches, mconf = sample_symmetric(warp0, certainty0, warp1, certainty1, num=5000)
-    kpts1, kpts2 = to_pixel_coordinates(sparse_matches, h1, w1, h2, w2)
-    return kpts1, kpts2, mconf, H_new, h1, w1, h2, w2
+    sparse_matches, mconf = sample_symmetric(warp0, certainty0, warp1, certainty1, num=2048, sample_thresh=0.5)
+    # kpts1, kpts2 = to_pixel_coordinates(sparse_matches, h1, w1, h2, w2)
+    # return kpts1, kpts2, mconf, H_new, h1, w1, h2, w2
+    return sparse_matches, mconf

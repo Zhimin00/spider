@@ -24,6 +24,7 @@ import torchvision.models as tvm
 from spider.utils.misc import interleave_list, transpose_to_landscape_warp, transpose_to_landscape_fm, transpose_to_landscape_fmwarp
 from spider.heads import head_factory
 from spider.blocks import BlockInject, Block_embed
+from mast3r.catmlp_dpt_head import mast3r_head_factory
 import pdb
 
 inf = float('inf')
@@ -32,7 +33,11 @@ def load_model(model_path, device, verbose=True):
     if verbose:
         print('... loading model from', model_path)
     ckpt = torch.load(model_path, map_location='cpu')
-    args = ckpt['args'].model.replace("ManyAR_PatchEmbed", "PatchEmbedDust3R")
+    args = ckpt['args'].model
+    if "ManyAR_PatchEmbed" in args:
+        args = args.replace("ManyAR_PatchEmbed", "PatchEmbedDust3R")
+    elif "ManyAR_DINOv3" in args:
+        args = args.replace("ManyAR_DINOv3", "PatchEmbedDINOv3")
     if 'landscape_only' not in args:
         args = args[:-1] + ', landscape_only=False)'
     else:
@@ -1632,22 +1637,22 @@ class DINOv3_SPIDER (CroCoNet):
     The goal is to output warp directly
     """
 
-    def __init__(self,
-                 detach=False,
+    def __init__(self,desc_mode=('norm'), 
+                 two_confs=False, 
+                 desc_conf_mode=None,
+                 output_mode='pts3d',
                  head_type1='warp',
-                 head_type2='fm',
-                 freeze='encoder',
+                 head_type2='cat',
+                 depth_mode=('exp', -inf, inf),
+                 conf_mode=('exp', 1, inf),
+                 freeze='none',
+                 landscape_only=True,
                  patch_embed_cls='ManyAR_DINOv3',  # PatchEmbedDust3R or ManyAR_PatchEmbed
                  vgg_pretrained = True,
-                 landscape_only = True,
-                 local_feat_dim = 24,
-                 desc_mode=('norm'),
-                 desc_conf_mode=('exp', 0, inf),
                  **croco_kwargs):
-        self.detach = detach
-        self.desc_conf_mode = desc_conf_mode
         self.desc_mode = desc_mode
-        self.local_feat_dim = local_feat_dim
+        self.two_confs = two_confs
+        self.desc_conf_mode = desc_conf_mode
         self.patch_embed_cls = patch_embed_cls
         self.croco_args = fill_default_args(croco_kwargs, super().__init__)
         super().__init__(**croco_kwargs)
@@ -1655,7 +1660,7 @@ class DINOv3_SPIDER (CroCoNet):
         # dust3r specific initialization
         self.enc_blocks=None
         self.dec_blocks2 = deepcopy(self.dec_blocks)
-        self.set_downstream_head(head_type1, head_type2, landscape_only, **croco_kwargs)
+        self.set_downstream_head(output_mode, head_type1, head_type2, landscape_only, depth_mode, conf_mode, **croco_kwargs)
         self.cnn = VGG19_all(pretrained=vgg_pretrained)
         self.cnn_feature_dims = [64, 128, 256, 512]
         self.set_freeze(freeze)
@@ -1691,32 +1696,32 @@ class DINOv3_SPIDER (CroCoNet):
         self.freeze = freeze
         to_be_frozen = {
             'none': [],
-            'mask': [self.mask_token],
-            'encoder': [self.mask_token, self.patch_embed, self.enc_blocks],
-            'backbone': [self.mask_token, self.enc_norm, self.decoder_embed, self.dec_norm, self.patch_embed.norm, self.patch_embed.proj, self.enc_blocks, self.dec_blocks, self.dec_blocks2],
-            'backbone+fm': [self.mask_token, self.enc_norm, self.decoder_embed, self.dec_norm, self.patch_embed.norm, self.patch_embed.proj, self.enc_blocks, self.dec_blocks, self.dec_blocks2, self.downstream_head1.init_desc, self.downstream_head2.init_desc],
-        }
+            'encoder': [self.patch_embed],
+            'backbone': [self.patch_embed, self.enc_norm, self.decoder_embed, self.dec_norm, self.dec_blocks, self.dec_blocks2],
+            }
         freeze_all_params(to_be_frozen[freeze])
 
     def _set_prediction_head(self, *args, **kwargs):
         """ No prediction head """
         return
 
-    def set_downstream_head(self, head_type1, head_type2, landscape_only, patch_size, img_size,
+    def set_downstream_head(self, output_mode, head_type1, head_type2, landscape_only, depth_mode, conf_mode, patch_size, img_size,
                             **kw):
         assert img_size[0] % patch_size == 0 and img_size[1] % patch_size == 0, \
             f'{img_size=} must be multiple of {patch_size=}'
+        self.output_mode = output_mode
         self.head_type1 = head_type1
         self.head_type2 = head_type2
+        self.depth_mode = depth_mode
+        self.conf_mode = conf_mode
         # allocate heads
-        self.downstream_headwarp = head_factory(head_type1, self)
+        self.downstream_head = head_factory(head_type1, self)
+        self.downstream_head1 = mast3r_head_factory(head_type2, output_mode, self, has_conf=bool(conf_mode))
+        self.downstream_head2 = mast3r_head_factory(head_type2, output_mode, self, has_conf=bool(conf_mode))
         # magic wrapper
-        self.headwarp = transpose_to_landscape_warp(self.downstream_headwarp, activate=landscape_only)
-        self.downstream_head1 = head_factory(head_type2,  self)
-        self.downstream_head2 = head_factory(head_type2,  self)
-        # magic wrapper
-        self.head1 = transpose_to_landscape_fm(self.downstream_head1, activate=landscape_only)
-        self.head2 = transpose_to_landscape_fm(self.downstream_head2, activate=landscape_only)
+        self.headwarp = transpose_to_landscape_warp(self.downstream_head, activate=landscape_only)
+        self.head1 = transpose_to_landscape(self.downstream_head1, activate=landscape_only)
+        self.head2 = transpose_to_landscape(self.downstream_head2, activate=landscape_only)
         
     def cnn_embed(self, img, true_shape):
         B, C, H, W = img.shape
@@ -1838,11 +1843,12 @@ class DINOv3_SPIDER (CroCoNet):
         final_output[-1] = tuple(map(self.dec_norm, final_output[-1]))
         return zip(*final_output)
 
-    def _downstream_head(self, head_num, cnn_feats, shape, upsample=False, low_desc = None, low_certainty = None):
-        B, S, D = cnn_feats[-1].shape
+    def _downstream_head(self, head_num, decout, img_shape):
+        B, S, D = decout[-1].shape
         # img_shape = tuple(map(int, img_shape))
         head = getattr(self, f'head{head_num}')
-        return head(cnn_feats, shape, upsample=upsample, low_desc=low_desc, low_certainty=low_certainty)
+        return head(decout, img_shape)
+
     def _downstream_headwarp(self, head_num, cnn_feats1, cnn_feats2, shape1, shape2, upsample=False,finest_corresps=None):
         B, S, D = cnn_feats1[-1].shape
         # img_shape = tuple(map(int, img_shape))
@@ -1865,7 +1871,7 @@ class DINOv3_SPIDER (CroCoNet):
             warnings.filterwarnings("ignore", category=FutureWarning)
             with torch.cuda.amp.autocast(enabled=False):
                 corresps = self._downstream_headwarp('warp', cnn_feats1, cnn_feats2, shape1, shape2)
-                res1 = self._downstream_head(1, cnn_feats1, shape1, upsample = False, low_desc = None, low_certainty = None)
-                res2 = self._downstream_head(2, cnn_feats2, shape2, upsample = False, low_desc = None, low_certainty = None)
-        
+                res1 = self._downstream_head(1, [tok.float() for tok in dec1], shape1)
+                res2 = self._downstream_head(2, [tok.float() for tok in dec2], shape2)
+        res2['pts3d_in_other_view'] = res2.pop('pts3d')
         return corresps, res1, res2

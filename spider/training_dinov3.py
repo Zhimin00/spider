@@ -32,6 +32,7 @@ import spider.utils.path_to_dust3r #noqa
 from dust3r.model import inf  # noqa: F401, needed when loading the model
 from dust3r.datasets import get_data_loader  # noqa
 from dust3r.datasets.utils.transforms import ColorJitter
+from dust3r.losses import * 
 import dust3r.utils.path_to_croco  # noqa: F401
 import croco.utils.misc as misc  # noqa
 from croco.utils.misc import NativeScalerWithGradNormCount as NativeScaler  # noqa
@@ -192,7 +193,7 @@ def train(args):
 
     print('Number of parameters: ', sum(p.numel() for p in model.parameters()))
     print('trainable parameters:', sum([p.numel() for n,p in model.named_parameters() if p.requires_grad]))
-    print('trainable warp head parameters:', sum([p.numel() for n,p in model.downstream_headwarp.named_parameters() if p.requires_grad]))
+    print('trainable warp head parameters:', sum([p.numel() for n,p in model.downstream_head.named_parameters() if p.requires_grad]))
     print('trainable head1 parameters:', sum([p.numel() for n,p in model.downstream_head1.named_parameters() if p.requires_grad]))
     print('trainable head2 parameters:', sum([p.numel() for n,p in model.downstream_head2.named_parameters() if p.requires_grad]))
 
@@ -347,7 +348,7 @@ def train_one_epoch(model: torch.nn.Module,
 
         # we use a per iteration (instead of per epoch) lr scheduler
         if data_iter_step % accum_iter == 0:
-            misc.adjust_learning_rate_spider(optimizer, epoch_f, args)
+            misc.adjust_learning_rate(optimizer, epoch_f, args)
         if batch is None:
             continue
         loss_tuple = loss_of_one_batch_twoheads(batch, model, criterion1, criterion2, criterion12, device,

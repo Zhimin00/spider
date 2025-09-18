@@ -165,6 +165,67 @@ def symmetric_inference_upsample(model, img1_coarse, img2_coarse, img1, img2, de
 
     return (low_corresps12, corresps12, low_corresps21, corresps21)
 
+
+@torch.no_grad()
+def twoheads_symmetric_inference(model, img1, img2, device):
+    # combine all ref images into object-centric representation
+    shape1 = img1['true_shape'].to(device, non_blocking=True)
+    shape2 = img2['true_shape'].to(device, non_blocking=True)
+    img1 = img1['img'].to(device, non_blocking=True)
+    img2 = img2['img'].to(device, non_blocking=True)
+    # compute encoder only once
+    feat1, feat2, pos1, pos2, cnn_feats1, cnn_feats2 = model._encode_image_pairs(img1, img2, shape1, shape2)
+
+    def decoder(feat1, feat2, pos1, pos2, shape1, shape2, cnn_feats1, cnn_feats2):
+        dec1, dec2 = model._decoder(feat1, pos1, feat2, pos2)
+        enc_output1, dec_output1 = dec1[0], dec1[-1]
+        enc_output2, dec_output2 = dec2[0], dec2[-1]
+        feat16_1 = torch.cat([enc_output1, dec_output1], dim=-1)
+        feat16_2 = torch.cat([enc_output2, dec_output2], dim=-1)
+        # cnn_feats1.append(feat16_1)
+        # cnn_feats2.append(feat16_2)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning)
+            with torch.cuda.amp.autocast(enabled=False):
+                corresps = model._downstream_headwarp('warp', cnn_feats1 + [feat16_1], cnn_feats2 + [feat16_2], shape1, shape2)
+        return corresps
+
+    # decoder 1-2
+    corresps12 = decoder(feat1, feat2, pos1, pos2, shape1, shape2, cnn_feats1, cnn_feats2)
+    # decoder 2-1
+    corresps21 = decoder(feat2, feat1, pos2, pos1, shape2, shape1, cnn_feats2, cnn_feats1)
+
+    return (corresps12, corresps21)
+
+@torch.no_grad()
+def twoheads_symmetric_inference_upsample(model, img1_coarse, img2_coarse, img1, img2, device):
+    # combine all ref images into object-centric representation
+    low_corresps12, low_corresps21 = symmetric_inference(model, img1_coarse, img2_coarse, device)
+    shape1 = img1['true_shape'].to(device, non_blocking=True)
+    shape2 = img2['true_shape'].to(device, non_blocking=True)
+    img1 = img1['img'].to(device, non_blocking=True)
+    img2 = img2['img'].to(device, non_blocking=True)
+    # compute encoder only once
+    cnn_feats1, cnn_feats2 = model._encode_image_pairs_upsample(img1, img2, shape1, shape2)
+    
+    def decoder(shape1, shape2, cnn_feats1, cnn_feats2, finest_corresps=None):
+        # cnn_feats1.append(feat16_1)
+        # cnn_feats2.append(feat16_2)
+        import warnings
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning)
+            with torch.cuda.amp.autocast(enabled=False):
+                corresps = model._downstream_headwarp('warp', cnn_feats1, cnn_feats2, shape1, shape2, upsample=True, finest_corresps=finest_corresps)
+        return corresps
+
+    # decoder 1-2
+    corresps12 = decoder(shape1, shape2, cnn_feats1, cnn_feats2, finest_corresps=low_corresps12[1])
+    # decoder 2-1
+    corresps21 = decoder(shape2, shape1, cnn_feats2, cnn_feats1, finest_corresps=low_corresps21[1])
+    return (low_corresps12, corresps12, low_corresps21, corresps21)
+
+
 @torch.no_grad()
 def fmwarp_symmetric_inference(model, img1, img2, device):
     # combine all ref images into object-centric representation
@@ -284,7 +345,7 @@ def loss_of_one_batch_fm(batch, model, criterion, device, symmetrize_batch=False
 
 def loss_of_one_batch_twoheads(batch, model, criterion1, criterion2, criterion12, device, symmetrize_batch=False, use_amp=False, ret=None):
     view1, view2 = batch
-    ignore_keys = set(['pts3d', 'dataset', 'label', 'instance', 'idx', 'true_shape', 'rng'])
+    ignore_keys = set(['dataset', 'label', 'instance', 'idx', 'true_shape', 'rng'])
     for view in batch:
         for name in view.keys():  # pseudo_focal
             if name in ignore_keys:

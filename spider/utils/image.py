@@ -18,7 +18,7 @@ except ImportError:
     heif_support_enabled = False
 
 ImgNorm = tvf.Compose([tvf.ToTensor(), tvf.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
-
+# ImgNorm = tvf.Compose([tvf.ToTensor(), tvf.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))])
 def _resize_pil_image(img, long_edge_size):
     S = max(img.size)
     if S > long_edge_size:

@@ -29,7 +29,7 @@ from PIL import Image
 from tqdm import tqdm
 
 
-def mast3r_match_path(save_dir, im_A_path, im_B_path, mast3r_model, device = 'cuda', coarse_size=512, fine_size=None, name='mast3r'):
+def mast3r_match_path(save_dir, im_A_path, im_B_path, mast3r_model, threshold, device = 'cuda', coarse_size=512, fine_size=None, name='mast3r'):
     imgs_ori = load_original_images([im_A_path, im_B_path], verbose=False)
     if fine_size == coarse_size or fine_size is None:
         imgs_coarse, _ = resize_image_with_intrinsics(imgs_ori, size=coarse_size, intrinsics=None, verbose=False)
@@ -72,13 +72,13 @@ def mast3r_match_path(save_dir, im_A_path, im_B_path, mast3r_model, device = 'cu
     # Draw matches
     # num_matches = len(mast3r_kpts1)
     # print(num_matches)
-    def draw_matches(save_dir, kpts1, kpts2, mconf, name='mast3r_matches.png', n_viz = 400):
+    def draw_matches(save_dir, kpts1, kpts2, mconf, threshold, name='mast3r_matches.png', n_viz = 400):
         valid_matches_im0 = (kpts1[:, 0] >= 3) & (kpts1[:, 0] < int(W0) - 3) & (
             kpts1[:, 1] >= 3) & (kpts1[:, 1] < int(H0) - 3)
 
         valid_matches_im1 = (kpts2[:, 0] >= 3) & (kpts2[:, 0] < int(W1) - 3) & (
             kpts2[:, 1] >= 3) & (kpts2[:, 1] < int(H1) - 3)
-        valid_matches_im = mconf > 0.2
+        valid_matches_im = mconf > threshold
         valid_matches = valid_matches_im0 & valid_matches_im1 & valid_matches_im
         matches_im0, matches_im1 = kpts1[valid_matches], kpts2[valid_matches]
         matches_conf = mconf[valid_matches]
@@ -122,40 +122,87 @@ def mast3r_match_path(save_dir, im_A_path, im_B_path, mast3r_model, device = 'cu
         # pl.savefig(os.path.join(save_dir, f'{name}_matches.png'), dpi=300, bbox_inches='tight')
         # pl.close()
 
-    num_matches = draw_matches(save_dir, mast3r_kpts1, mast3r_kpts2, mast3r_mconf, name=name)
+    num_matches = draw_matches(save_dir, mast3r_kpts1, mast3r_kpts2, mast3r_mconf, threshold, name=name)
     return num_matches
 
 if __name__ == '__main__':
     device = "cuda"
-    # mast3r_model = AsymmetricMASt3R.from_pretrained("/cis/home/zshao14/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth").to(device)
-    mast3r_model = AsymmetricMASt3R.from_pretrained("/cis/home/zshao14/Downloads/spider/model_weights/aerial-mast3r.pth").to(device)
-    pairs = np.load('/cis/net/r24a/data/zshao/data/doppelgangers/pairs_metadata/doppelgangers/pairs_metadata/test_pairs.npy', allow_pickle = True)
+    mast3r_model = AsymmetricMASt3R.from_pretrained("/cis/home/zshao14/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth").to(device)
+    # mast3r_model = AsymmetricMASt3R.from_pretrained("/cis/home/zshao14/Downloads/spider/model_weights/aerial-mast3r.pth").to(device)
+    dp_pairs = np.load('/cis/net/r24a/data/zshao/data/doppelgangers/pairs_metadata/doppelgangers/pairs_metadata/test_pairs.npy', allow_pickle = True)
     save_dir = '/cis/home/zshao14/Documents/dg'
     data_dir = '/cis/net/r24a/data/zshao/data/doppelgangers/test_set/test_set'
+
+    data_root = '/cis/net/io96/data/zshao/JHU-ULTRA-360/pairs'
+    scene_names = ["24_Clark.npy",
+                "10_AMES.npy",
+                "24_Clark.npy",
+                "28_Garland.npy",
+                "30_Gilman.npy",
+                "34_Hackerman.npy",
+                "35_Hodson.npy",
+                "48_Latrobe.npy",
+                "49_Levering.npy",
+                "53_Maryland.npy",
+                "54_Mason.npy",
+                # "77_Shaffer.npy",
+                "78_Shriver.npy",
+            ]
+            
+    scenes = [
+            np.load(f"{data_root}/{scene}", allow_pickle=True)
+            for scene in scene_names
+        ]
+    
     # pairs = np.load('/cis/net/r24a/data/zshao/data/doppelgangers/pairs_metadata/doppelgangers/pairs_metadata/train_pairs_megadepth.npy', allow_pickle = True)
     # save_dir = '/cis/home/zshao14/Documents/dg/train_megadepth'
     # data_dir = '/cis/net/r24a/data/zshao/data/doppelgangers/doppelgangers/images/train_megadepth'
-    tot_0 = []
-    tot_1 = []
-    print(len(pairs))
-    for idx, pair in enumerate(tqdm(pairs)):
-        # if idx % 400 == 0: 
-        im_A_path = os.path.join(data_dir, pair[0])
-        im_B_path = os.path.join(data_dir, pair[1])
-        name = pair[0].split('/')[0] + str(idx) + '_label' + str(pair[2]) + '_num' + str(pair[3])
-        # print(name)
-        save_path = os.path.join(save_dir, name)
-        os.makedirs(save_path, exist_ok=True)
-        try:
-            with torch.no_grad():
-                num_matches = mast3r_match_path(save_path, im_A_path, im_B_path, mast3r_model, device, coarse_size=512, fine_size=512, name='aerial-mast3r512')
-            if pair[2] == 0:
-                tot_0.append(num_matches)
-            else:
-                tot_1.append(num_matches)
-        except Exception as e:
-            print(f"Error processing {save_path}: {e}")
-            continue
-    print('Model: aerialmast3r512')
-    print(f'Num Doppel {len(tot_0)} pairs, Average Matches: {np.mean(tot_0)}')
-    print(f'Num Normal {len(tot_1)} pairs, Average Matches: {np.mean(tot_1)}')
+    thresholds = [0.5, 1]
+    for threshold in thresholds:
+        tot_0 = []
+        tot_1 = []
+        tot_2 = []
+        
+   
+        for idx, pair in enumerate(tqdm(dp_pairs)):
+            # if idx % 400 == 0: 
+            im_A_path = os.path.join(data_dir, pair[0])
+            im_B_path = os.path.join(data_dir, pair[1])
+            name = pair[0].split('/')[0] + str(idx) + '_label' + str(pair[2]) + '_num' + str(pair[3])
+            # print(name)
+            save_path = os.path.join(save_dir, name)
+            # os.makedirs(save_path, exist_ok=True)
+            try:
+                with torch.no_grad():
+                    num_matches = mast3r_match_path(save_path, im_A_path, im_B_path, mast3r_model, threshold, device, coarse_size=512, fine_size=512, name='mast3r512')
+                if pair[2] == 0:
+                    tot_0.append(num_matches)
+                else:
+                    tot_1.append(num_matches)
+            except Exception as e:
+                print(f"Error processing {save_path}: {e}")
+                continue
+
+        for scene_ind in range(len(scenes)):
+            scene_name = scene_names[scene_ind].split('.')[0]
+            pairs = scenes[scene_ind]
+            
+            pair_inds = range(len(pairs))
+            for pairind in tqdm(pair_inds):
+                im1_name, im2_name,  shared_points, overlap_ratio, T1, T2, K1, K2= pairs[pairind]
+
+                im_A_path = f"{data_root}/{scene_name}/{im1_name}"
+                im_B_path = f"{data_root}/{scene_name}/{im2_name}"          
+                try:
+                    with torch.no_grad():
+                        num_matches = mast3r_match_path(save_path, im_A_path, im_B_path, mast3r_model, threshold, device, coarse_size=512, fine_size=512, name='mast3r512')
+                        tot_2.append(num_matches)
+                except Exception as e:
+                    print(f"Error processing {save_path}: {e}")
+                    continue
+
+        print('Model: aerialmast3r512')
+        print(f'Threshold: {threshold}')
+        print(f'Num Doppel {len(tot_0)} pairs, Average Matches: {np.mean(tot_0)}')
+        print(f'Num Normal {len(tot_1)} pairs, Average Matches: {np.mean(tot_1)}')
+        print(f'Num Cross_view {len(tot_2)} pairs, Average Matches: {np.mean(tot_2)}')

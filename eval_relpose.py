@@ -53,13 +53,13 @@ def test_hpatches(model, name, coarse_size=512, fine_size=1344):
     hpatches_results = hpatches_benchmark.benchmark(model, coarse_size=coarse_size, fine_size=fine_size)
     json.dump(hpatches_results, open(f"./results/hpatches_{name}.json", "w"))
     
-    hpatches_benchmark_view = HpatchesHomogBenchmark('/cis/net/r24a/data/zshao/data/hpatches-sequence-release', seqs_dir='hpatches-sequences-v')
-    hpatches_view_results = hpatches_benchmark_view.benchmark(model, coarse_size=coarse_size, fine_size=fine_size)
-    json.dump(hpatches_view_results, open(f"./results/hpatches_view_{name}.json", "w"))
+    # hpatches_benchmark_view = HpatchesHomogBenchmark('/cis/net/r24a/data/zshao/data/hpatches-sequence-release', seqs_dir='hpatches-sequences-v')
+    # hpatches_view_results = hpatches_benchmark_view.benchmark(model, coarse_size=coarse_size, fine_size=fine_size)
+    # json.dump(hpatches_view_results, open(f"./results/hpatches_view_{name}.json", "w"))
 
-    hpatches_benchmark_illu = HpatchesHomogBenchmark('/cis/net/r24a/data/zshao/data/hpatches-sequence-release', seqs_dir='hpatches-sequences-i')
-    hpatches_illu_results = hpatches_benchmark_illu.benchmark(model, coarse_size=coarse_size, fine_size=fine_size)
-    json.dump(hpatches_illu_results, open(f"./results/hpatches_illumination_{name}.json", "w"))
+    # hpatches_benchmark_illu = HpatchesHomogBenchmark('/cis/net/r24a/data/zshao/data/hpatches-sequence-release', seqs_dir='hpatches-sequences-i')
+    # hpatches_illu_results = hpatches_benchmark_illu.benchmark(model, coarse_size=coarse_size, fine_size=fine_size)
+    # json.dump(hpatches_illu_results, open(f"./results/hpatches_illumination_{name}.json", "w"))
 
 def test_jhu(model, name, coarse_size=512, fine_size=1600):
     # detector = dad_detector.load_DaD()

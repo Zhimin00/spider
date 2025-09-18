@@ -271,6 +271,66 @@ class InfoNCE(MatchingCriterion):
             raise ValueError("This should not happen...")
         return loss[valid_matches]
 
+class InfoNCE_weighted(MatchingCriterion):
+    def __init__(self, temperature=0.07, eps=1e-8, mode='all', **kwargs):
+        super().__init__(**kwargs)
+        self.temperature = temperature
+        self.eps = eps
+        assert mode in ['all', 'proper', 'dual']
+        self.mode = mode
+
+    def loss(self, desc1, desc2, desc_warp, valid_matches=None, euc=False):
+        # valid positives are along diagonals
+        B, N, D = desc1.shape
+        B_warp, N_warp, D_warp = desc_warp
+        B2, N2, D2 = desc2.shape
+        assert B == B2 and D == D2 and B == B_warp, D == D_warp
+        if valid_matches is None:
+            valid_matches = torch.ones([B, N], dtype=bool)
+        # torch.all(valid_matches.sum(dim=-1) > 0) some pairs have no matches????
+        assert valid_matches.shape == torch.Size([B, N]) and valid_matches.sum() > 0
+
+        # Tempered similarities
+        sim = get_similarities(desc1, desc2, euc) / self.temperature
+        sim[sim.isnan()] = -torch.inf  # ignore nans
+        # Softmax of positives with temperature
+        sim = sim.exp_()  # save peak memory
+        positives = sim.diagonal(dim1=-2, dim2=-1)
+        
+        sim_warp = get_similarities(desc1, desc_warp, euc) / self.temperature
+        sim_warp[sim_warp.isnan()] = -torch.inf  # ignore nans
+        # Softmax of positives with temperature
+        sim_warp = sim_warp.exp_()  # save peak memory
+        positives_warp = sim.diagonal(dim1=-2, dim2=-1)
+
+        # normalize sim to [0,1], per sample
+        norm_sim = positives / (positives.max(dim=-1, keepdim=True).values + 1e-8)
+        weights = 1.0 - norm_sim  # strong weight when sim is low
+
+        # --- Base loss ---
+        if self.mode == 'all':            # Previous InfoNCE
+            base_loss = -torch.log((positives / sim.sum(dim=-1).sum(dim=-1, keepdim=True)).clip(self.eps))
+        elif self.mode == 'proper':       # Proper InfoNCE
+            base_loss = -(torch.log((positives / sim.sum(dim=-2)).clip(self.eps)) +
+                        torch.log((positives / sim.sum(dim=-1)).clip(self.eps)))
+        elif self.mode == 'dual':         # Dual Softmax
+            base_loss = -(torch.log((positives**2 / sim.sum(dim=-1) / sim.sum(dim=-2)).clip(self.eps)))
+        else:
+            raise ValueError("This should not happen...")
+
+        # --- Warp loss (weighted by similarity gap) ---
+        # --- Warp loss (mirrors base modes) ---
+        if self.mode == 'all':
+            warp_loss = -weights * torch.log((positives_warp / sim_warp.sum(dim=-1).sum(dim=-1, keepdim=True)).clip(self.eps))
+        elif self.mode == 'proper':
+            warp_loss = -weights * (torch.log((positives_warp / sim_warp.sum(dim=-2)).clip(self.eps)) +
+                                    torch.log((positives_warp / sim_warp.sum(dim=-1)).clip(self.eps)))
+        elif self.mode == 'dual':
+            warp_loss = -weights * torch.log((positives_warp**2 / sim_warp.sum(dim=-1) / sim_warp.sum(dim=-2)).clip(self.eps))
+        else:
+            raise ValueError("This should not happen...")
+        # --- Total loss ---
+        return warp_loss[valid_matches]
 
 class APLoss (MatchingCriterion):
     """ AP loss
@@ -456,6 +516,138 @@ class MatchingLoss (Criterion, MultiLoss):
 
         details[type(self).__name__] = float(loss.mean())
         return loss, (details | monitoring)
+
+
+
+class WarpMatchingLoss3 (Criterion, MultiLoss):
+    """ 
+    Matching loss per image 
+    only compare pixels inside an image but not in the whole batch as what would be done usually
+    """
+
+    def __init__(self, criterion, withconf=False, use_pts3d=False, normalize=False, negatives_padding=0, blocksize=4096, threshold=0.5):
+        super().__init__(criterion)
+        self.normalize = normalize
+        self.negatives_padding = negatives_padding
+        self.use_pts3d = use_pts3d
+        self.blocksize = blocksize
+        self.withconf = withconf
+
+    def add_negatives(self, outdesc2, desc2, batchid, x2, y2):
+        if self.negatives_padding:
+            B, H, W, D = desc2.shape
+            negatives = torch.ones([B, H, W], device=desc2.device, dtype=bool)
+            negatives[batchid, y2, x2] = False
+            sel = negatives & (negatives.view([B, -1]).cumsum(dim=-1).view(B, H, W)
+                               <= self.negatives_padding)  # take the N-first negatives
+            outdesc2 = torch.cat([outdesc2, desc2[sel].view([B, -1, D])], dim=1)
+        return outdesc2
+
+    def get_confs(self, pred1, pred2, sel1, sel2):
+        if self.withconf:
+            if self.use_pts3d:
+                outconfs1 = pred1['conf'][sel1]
+                outconfs2 = pred2['conf'][sel2]
+            else:
+                outconfs1 = pred1['desc_conf'][sel1]
+                outconfs2 = pred2['desc_conf'][sel2]
+        else:
+            outconfs1 = outconfs2 = None
+        return outconfs1, outconfs2
+
+    
+    def get_descs(self, pred1, pred2):
+        if self.use_pts3d:
+            desc1, desc2 = pred1['pts3d'], pred2['pts3d_in_other_view']
+        else:
+            desc1, desc2 = pred1['desc'], pred2['desc']
+        return desc1, desc2
+
+    def get_matching_descs(self, gt1, gt2, pred1, pred2, corresps=None, **kw):
+        outdesc1 = outdesc2 = outconfs1 = outconfs2 = None
+        # Recover descs, GT corres and valid mask
+        desc1, desc2 = self.get_descs(pred1, pred2)
+        B, H, W, C = desc1.shape
+        
+        flow = corresps[1]['flow'] #B, 2, H1, W1
+        certainty = corresps[1]['certainty'][:,0].exp().clip(max= float('inf')) #B, H1, W1
+        desc1_warped = nn.functional.grid_sample(desc2.permute(0, 3, 1, 2), flow.permute(0, 2, 3, 1), mode= 'bilinear', align_corners = True) #B, H1, W1, C
+        desc1_warped = desc1_warped.permute(0, 2, 3, 1) #B, H1, W1, C
+        # cert_flat = certainty.reshape(-1)
+        # probs = cert_flat / (cert_flat.sum() + 1e-6)
+        # idx = torch.multinomial(probs, self.num_samples, replacement=False)
+        # f1[idx], f1_warped[idx]
+        (x1, y1), (x2, y2) = gt1['corres'].unbind(-1), gt2['corres'].unbind(-1) # b*2, 8192
+        valid_matches = gt1['valid_corres']
+
+        # Select descs that have GT matches
+        B, N = x1.shape
+        batchid = torch.arange(B)[:, None].repeat(1, N)  # B, N
+        outdesc1, outdesc2 = desc1[batchid, y1, x1], desc2[batchid, y2, x2]  # B, N, D
+        # Padd with unused negatives
+        outdesc2 = self.add_negatives(outdesc2, desc2, batchid, x2, y2)
+
+        # Gather confs if needed
+        sel1 = batchid, y1, x1
+        sel2 = batchid, y2, x2
+        outconfs1, outconfs2 = self.get_confs(pred1, pred2, sel1, sel2)
+
+        outdesc_warp = desc1_warped[batchid, y1, x1]  # B, N, D
+        outconfs_warp = certainty[sel1]
+
+        return outdesc1, outdesc2, outdesc_warp, outconfs1, outconfs2, outconfs_warp, valid_matches, {'use_euclidean_dist': self.use_pts3d}
+
+    def blockwise_criterion(self, descs1, descs2, descs_warp, confs1, confs2, confs_warp, valid_matches, euc, rng=np.random, shuffle=True):
+        loss = None
+        details = {}
+        B, N, D = descs1.shape
+
+        if N <= self.blocksize:  # Blocks are larger than provided descs, compute regular loss
+            loss = self.criterion(descs1, descs2, descs_warp, valid_matches, euc=euc)
+        else:  # Compute criterion on the blockdiagonal only, after shuffling
+            # Shuffle if necessary
+            matches_perm = slice(None)
+            if shuffle:
+                matches_perm = np.stack([rng.choice(range(N), size=N, replace=False) for _ in range(B)])
+                batchid = torch.tile(torch.arange(B), (N, 1)).T
+                matches_perm = batchid, matches_perm
+
+            descs1 = descs1[matches_perm]
+            descs2 = descs2[matches_perm]
+            descs_warp = descs_warp[matches_perm]
+            valid_matches = valid_matches[matches_perm]
+
+            assert N % self.blocksize == 0, "Error, can't chunk block-diagonal, please check blocksize"
+            n_chunks = N // self.blocksize
+            descs1 = descs1.reshape([B * n_chunks, self.blocksize, D])  # [B*(N//blocksize), blocksize, D]
+            descs2 = descs2.reshape([B * n_chunks, self.blocksize, D])  # [B*(N//blocksize), blocksize, D]
+            descs_warp = descs_warp.reshape([B * n_chunks, self.blocksize, D])  # [B*(N//blocksize), blocksize, D]
+            valid_matches = valid_matches.view([B * n_chunks, self.blocksize])
+            loss = self.criterion(descs1, descs2, descs_warp, valid_matches, euc=euc)
+            if self.withconf:
+                confs1, confs2, confs_warp = map(lambda x: x[matches_perm], (confs1, confs2, confs_warp))  # apply perm to confidences if needed
+
+        if self.withconf:
+            # split confidences between positives/negatives for loss computation
+            details['conf_pos'] = map(lambda x: x[valid_matches.view(B, -1)], (confs1, confs2, confs_warp))
+            details['conf_neg'] = map(lambda x: x[~valid_matches.view(B, -1)], (confs1, confs2, confs_warp))
+            details['Conf1_std'] = confs1.std()
+            details['Conf2_std'] = confs2.std()
+
+        return loss, details
+
+    def compute_loss(self, gt1, gt2, pred1, pred2, **kw):
+        # Gather preds and GT
+        descs1, descs2, desc_warp, confs1, confs2, confs_warp, valid_matches, monitoring = self.get_matching_descs(
+            gt1, gt2, pred1, pred2, **kw)
+
+        # loss on matches
+        loss, details = self.blockwise_criterion(descs1, descs2, desc_warp, confs1, confs2, confs_warp,
+                                                 valid_matches, euc=monitoring.pop('use_euclidean_dist', False))
+
+        details[type(self).__name__] = float(loss.mean())
+        return loss, (details | monitoring)
+
 
 class WarpMatchingLoss (Criterion, MultiLoss):
     """ 

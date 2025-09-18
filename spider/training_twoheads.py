@@ -52,6 +52,7 @@ def get_args_parser():
     parser.add_argument('--model', default="SPIDER(patch_embed_cls='ManyAR_PatchEmbed')",
                         type=str, help="string containing the model to build")
     parser.add_argument('--pretrained', default=None, help='path of a starting checkpoint')
+    parser.add_argument('--pretrained_warp', default=None, help='path of a starting checkpoint')
     parser.add_argument('--train_criterion1', default="RobustLosses()",
                         type=str, help="train criterion1")
     parser.add_argument('--train_criterion2', default=None,
@@ -167,9 +168,18 @@ def train(args):
 
     if args.pretrained and not args.resume:
         print('Loading pretrained: ', args.pretrained)
-        ckpt = torch.load(args.pretrained, map_location=device)
-        # state_dict = ckpt['model']
-        print(model.load_state_dict(ckpt['model'], strict=False))
+        ckpt = torch.load(args.pretrained, map_location=device)['model']
+
+        print('Loading pretrained warp:', args.pretrained_warp)
+        warp_ckpt = torch.load(args.pretrained_warp, map_location=device)['model']
+
+        for k, v in warp_ckpt.items():
+            if k.startswith("downstream_head."):
+                new_k = k.replace("downstream_head.", "downstream_headwarp.", 1)
+                ckpt[new_k] = v
+
+        # load into model
+        print(model.load_state_dict(ckpt, strict=False))
         # renamed = {}
         # for k, v in state_dict.items():
         #     if k.startswith("downstream_head1.head_local_features"):
@@ -180,8 +190,8 @@ def train(args):
         #                     "downstream_head.head_local_features2", 1)
         #     renamed[k] = v
         # print(model.load_state_dict(renamed, strict=False))
-        del ckpt#, renamed  # in case it occupies memory
-
+        del ckpt, warp_ckpt#, renamed  # in case it occupies memory
+    
     eff_batch_size = args.batch_size * args.accum_iter * misc.get_world_size()
     if args.lr is None:  # only base_lr is specified
         args.lr = args.blr * eff_batch_size / 256
@@ -195,7 +205,7 @@ def train(args):
     print('trainable warp head parameters:', sum([p.numel() for n,p in model.downstream_headwarp.named_parameters() if p.requires_grad]))
     print('trainable head1 parameters:', sum([p.numel() for n,p in model.downstream_head1.named_parameters() if p.requires_grad]))
     print('trainable head2 parameters:', sum([p.numel() for n,p in model.downstream_head2.named_parameters() if p.requires_grad]))
-
+    # pdb.set_trace()
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(
             model, device_ids=[args.gpu], find_unused_parameters=True, static_graph=True)
@@ -205,10 +215,10 @@ def train(args):
     # param_groups = misc.get_parameter_groups(model_without_ddp, args.weight_decay)
     # optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
     param_groups = [
-        {"params": model_without_ddp.cnn.parameters(), "lr": 32 * 5e-6 / 8},
-        {"params": model_without_ddp.downstream_headwarp.parameters(), "lr": 32 * 1e-4 / 8},
-        {"params": model_without_ddp.downstream_head1.parameters(), "lr": 32 * 1e-4 / 8},
-        {"params": model_without_ddp.downstream_head2.parameters(), "lr": 32 * 1e-4 / 8},
+        {"params": model_without_ddp.cnn.parameters(), "lr": 32 * 5e-7 / 8},
+        {"params": model_without_ddp.downstream_headwarp.parameters(), "lr": 32 * 1e-5 / 8},
+        # {"params": model_without_ddp.downstream_head1.parameters(), "lr": 32 * 1e-4 / 8},
+        # {"params": model_without_ddp.downstream_head2.parameters(), "lr": 32 * 1e-4 / 8},
     ]
     optimizer = torch.optim.AdamW(param_groups, weight_decay=0.01)
     print(optimizer)

@@ -1,7 +1,7 @@
 
 ## Table of Contents
 
-- [Table of Contents](#table-of-contents）
+- [Table of Contents](#table-of-contents)
 - [Get Started](#get-started)
   - [Installation](#installation)
   - [Checkpoints](#checkpoints)
